@@ -1,0 +1,16 @@
+# check for fmt strings like
+#
+# let x = "hi";
+# println!("{x}");
+patterns:
+  - >
+    &_VAR = $_STR;
+    ...
+    println!($_FMT)
+languages:
+  - rust
+name: fmt_test_example
+out:
+  literal_key: literal_value
+transform:
+  _FMT: ^\{(?<_VAR>[^}]+)}$

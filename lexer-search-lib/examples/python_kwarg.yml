@@ -1,0 +1,9 @@
+# variable assigned to variable, then used as key word arg in something function
+patterns:
+  - >
+    &V=&ABC
+    ...
+    something(... kwar=&V ... )
+name: py_kwarg_example
+languages:
+  - py
