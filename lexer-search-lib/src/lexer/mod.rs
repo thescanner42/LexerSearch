@@ -64,11 +64,6 @@ pub trait Lexer {
     ///
     /// the pattern file recognized more tokens: ellipsis or captures
     fn configured_for_pattern(&self) -> bool;
-
-    /// a property of this languages source
-    fn pythonic_scopes(&self) -> bool {
-        false
-    }
 }
 
 /// dyn or any-like lexer
@@ -105,20 +100,22 @@ impl Lexer for EnumLexer {
             EnumLexer::RustLike(lexer) => lexer.configured_for_pattern(),
         }
     }
-
-    fn pythonic_scopes(&self) -> bool {
-        match self {
-            EnumLexer::CLike(lexer) => lexer.pythonic_scopes(),
-            EnumLexer::PythonLike(lexer) => lexer.pythonic_scopes(),
-            EnumLexer::RustLike(lexer) => lexer.pythonic_scopes(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaybeSliceRef<'a> {
     Some(&'a [u8]),
     Len(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum EllipsisEnum {
+    // ...
+    Normal,
+    // ..> corner bracket ellipsis operator
+    CBE,
+    // ..} scope blocking ellipsis operator
+    SBE,
 }
 
 /// reference to token emitted by lexer
@@ -134,24 +131,19 @@ pub enum LexerTokenVariant<'a> {
     String(MaybeSliceRef<'a>, usize),
     Identifier(MaybeSliceRef<'a>),
     /// contains level change and maybe slice
-    ///
-    /// lexical level change is meant to be agnostic between languages
-    ///
-    /// in python-like:
+    /// 
+    /// only used in python-like
     ///  - lexical level change of 0 occurs at end of statement if no
     ///    indentation change happens on the next line
     ///  - lexical level change matches change in indentation level, comparing
     ///    against previous indentation levels
-    ///
-    /// in c-like and rust-like:
-    ///  - lexical level change of 0 occurs for ';', since it's semantically
-    ///    similar to the equivalent in python. this means no Byte(';')
-    ///  - lexical level occurs from the curly brackets
     LexicalLevelChange(i32, MaybeSliceRef<'a>),
-    /// ...
+    /// ... or ..>
     ///
     /// only emitted when the lexer is set to process a pattern
-    Ellipsis,
+    /// 
+    /// true indicates cbee
+    Ellipsis(EllipsisEnum),
     /// $VAR, #VAR or &VAR
     ///
     /// only emitted when the lexer is set to process a pattern
@@ -175,7 +167,7 @@ impl<'a> LexerTokenVariant<'a> {
                 MaybeSliceRef::Some(buf) => buf.len(),
                 MaybeSliceRef::Len(len) => *len,
             },
-            LexerTokenVariant::Ellipsis => 3,
+            LexerTokenVariant::Ellipsis(_) => 3,
             LexerTokenVariant::Capture(ms) => match ms {
                 MaybeSliceRef::Some(buf) => buf.len(),
                 MaybeSliceRef::Len(len) => *len,
@@ -246,7 +238,6 @@ mod tests {
 
             {
                 let mut lexer = make_lexer();
-                let pythonic = lexer.pythonic_scopes();
                 let mut previous_token_end: Option<Position> = None;
                 let mut token_produced_count = 0;
 
@@ -255,12 +246,6 @@ mod tests {
                     token_produced_count += 1;
                     if token_produced_count > 100 {
                         panic!("infinite loop detected in lexer for input: {:?}", data);
-                    }
-
-                    if pythonic {
-                        assert!(token.start.offset <= token.end.offset, "{:?}", data);
-                    } else {
-                        assert!(token.start.offset < token.end.offset, "{:?}", data);
                     }
 
                     assert!(token.start.line <= token.end.line, "{:?}", data);

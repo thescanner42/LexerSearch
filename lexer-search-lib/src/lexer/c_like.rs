@@ -1,6 +1,6 @@
 use std::num::NonZero;
 
-use crate::lexer::{LexerToken, LexerTokenVariant, MaybeSliceRef, Position, calc_start_offset};
+use crate::lexer::{EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, calc_start_offset};
 
 use super::utf8_multibyte_part;
 
@@ -201,23 +201,6 @@ impl super::Lexer for Lexer {
                         } else if byte == b'\'' {
                             self.state =
                                 LexerEnum::String(1, QuoteType::SingleQuote, StringEscaped::Normal);
-                        } else if byte == b'{' || byte == b'}' || byte == b';' {
-                            let v = match byte {
-                                b'{' => 1,
-                                b'}' => -1,
-                                b';' => 0,
-                                _ => unreachable!(),
-                            };
-                            return Ok(Some(ret_token(
-                                self,
-                                LexerTokenVariant::LexicalLevelChange(
-                                    v,
-                                    MaybeSliceRef::Some(
-                                        &self.buffer[self.buffer_start_offset - 1
-                                            ..self.buffer_start_offset],
-                                    ),
-                                ),
-                            )));
                         } else if byte == b'.' && self.pattern_enabled {
                             self.state = LexerEnum::EllipsisDot;
                         } else if byte == b'$' && self.pattern_enabled {
@@ -397,9 +380,15 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' {
+                        if byte == b'.' || byte == b'>' || byte == b'}' {
                             self.state = LexerEnum::Start;
-                            return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis)));
+                            let t = match byte {
+                                b'.' => EllipsisEnum::Normal,
+                                b'>' => EllipsisEnum::CBE,
+                                b'}' => EllipsisEnum::SBE,
+                                _ => unreachable!(),
+                            };
+                            return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis(t))));
                         } else {
                             //    V
                             // ..?
@@ -547,7 +536,32 @@ mod tests {
         // "..." at byte 0
         let tok = lexer.next(&mut c).unwrap().unwrap();
         assert_eq!(tok.start.offset, 0);
-        assert_eq!(tok.variant, LexerTokenVariant::Ellipsis);
+        assert_eq!(tok.variant, LexerTokenVariant::Ellipsis(EllipsisEnum::Normal));
+
+        assert!(lexer.next(&mut c).unwrap().is_none());
+
+        // "test" at byte 4 (after "... ")
+        let tok = lexer.drain().unwrap();
+        assert_eq!(tok.start.offset, 4);
+        assert_eq!(
+            tok.variant,
+            LexerTokenVariant::Identifier(MaybeSliceRef::Some(b"test"))
+        );
+
+        // EOF
+        assert!(lexer.drain().is_none());
+    }
+
+    #[test]
+    fn cellipsis_then_identifier_positions() {
+        let s = b"..> test";
+        let mut c = Cursor::new(s);
+        let mut lexer = lexer_for_test();
+
+        // "..." at byte 0
+        let tok = lexer.next(&mut c).unwrap().unwrap();
+        assert_eq!(tok.start.offset, 0);
+        assert_eq!(tok.variant, LexerTokenVariant::Ellipsis(EllipsisEnum::CBE));
 
         assert!(lexer.next(&mut c).unwrap().is_none());
 

@@ -1,7 +1,7 @@
 use std::num::NonZero;
 
 use crate::lexer::{
-    LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset,
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset
 };
 
 use super::utf8_multibyte_part;
@@ -184,23 +184,6 @@ impl super::Lexer for Lexer {
                             self.state = LexerEnum::DoubleQuoteString(1, StringEscaped::Normal);
                         } else if byte == b'\'' {
                             self.state = LexerEnum::SingleQuoteStart;
-                        } else if byte == b'{' || byte == b'}' || byte == b';' {
-                            let v = match byte {
-                                b'{' => 1,
-                                b'}' => -1,
-                                b';' => 0,
-                                _ => unreachable!(),
-                            };
-                            return Ok(Some(ret_token(
-                                self,
-                                LexerTokenVariant::LexicalLevelChange(
-                                    v,
-                                    MaybeSliceRef::Some(
-                                        &self.buffer[self.buffer_start_offset - 1
-                                            ..self.buffer_start_offset],
-                                    ),
-                                ),
-                            )));
                         } else if byte == b'.' && self.pattern_enabled {
                             self.state = LexerEnum::EllipsisDot;
                         } else if byte == b'$' && self.pattern_enabled {
@@ -433,9 +416,15 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' {
+                        if byte == b'.' || byte == b'>' || byte == b'}' {
                             self.state = LexerEnum::Start;
-                            return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis)));
+                            let t = match byte {
+                                b'.' => EllipsisEnum::Normal,
+                                b'>' => EllipsisEnum::CBE,
+                                b'}' => EllipsisEnum::SBE,
+                                _ => unreachable!(),
+                            };
+                            return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis(t))));
                         } else {
                             //    V
                             // ..?

@@ -5,7 +5,7 @@
 patterns:
   - >
     &_VAR = $_STR;
-    ...
+    ..}
     println!($_FMT)
 languages:
   - rust

@@ -2,7 +2,7 @@
 patterns:
   - >
     &_VAR = $_STR;
-    ...
+    ..}
     my_function(&_VAR)
   - my_function($_STR)
 name: transform_regex

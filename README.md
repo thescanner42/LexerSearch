@@ -8,7 +8,7 @@ example:
 patterns: # example pattern
   - >
     &_VAR = $_STR;
-    ...
+    ..}
     my_function(&_VAR)
   - my_function($_STR)
 name: transform_regex
@@ -62,10 +62,9 @@ overlong tokens.
 # How?
 
 Patterns are combined with a trie-like data structure. It supports transitions
-which are reflexive (... operator), captures, or back references; partial
-matches store capture information to facilitate this. There is also logic to
-handle bracket and lexical level so that ... does not extend more or less than
-it should.
+which are reflexive, captures, or back references; partial matches store capture
+information to facilitate this. There is also logic to handle bracket and
+lexical level so that ... does not extend more or less than it should.
 
 Partial matches follow transitions as an NFA; a maximum number of partial
 matches are allowed, with priority given to later starting position.

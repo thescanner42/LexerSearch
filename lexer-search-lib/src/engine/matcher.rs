@@ -11,17 +11,26 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     engine::{canonicalizer::Canonicalizer, grouper::Grouper},
-    lexer::{Lexer, LexerToken, LexerTokenVariant, MaybeSliceRef, Position},
+    lexer::{EllipsisEnum, Lexer, LexerToken, LexerTokenVariant, MaybeSliceRef, Position},
 };
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BracketType {
+    #[default]
+    Round,
+    Square,
+    Corner,
+    Curly,
+}
 
 /// bounded length owned token
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TokenVariant {
-    /// stops non-continuation patterns
+    /// stops non-reflexive patterns
     OverlongIdentifier,
-    /// stops non-continuation patterns
+    /// stops non-reflexive patterns
     OverlongNumber,
-    /// stops non-continuation patterns
+    /// stops non-reflexive patterns
     OverlongString,
 
     /// some character. like "*". this has lowest precedence. for example in
@@ -36,7 +45,7 @@ pub enum TokenVariant {
     LexicalLevelChange(i32),
 
     /// only used by pattern creation logic, not matching logic
-    Ellipsis,
+    Ellipsis(EllipsisEnum),
     /// only used by pattern creation logic, not matching logic
     Capture(Box<[u8]>),
     /// only used by pattern creation logic, not matching logic
@@ -77,7 +86,7 @@ impl Token {
                     TokenVariant::LexicalLevelChange(delta)
                 }
                 // not produced by lexer not configured for pattern
-                LexerTokenVariant::Ellipsis => TokenVariant::Ellipsis,
+                LexerTokenVariant::Ellipsis(b) => TokenVariant::Ellipsis(b),
                 LexerTokenVariant::Capture(MaybeSliceRef::Len(_)) => TokenVariant::OverlongCapture,
                 LexerTokenVariant::Capture(MaybeSliceRef::Some(items)) => {
                     TokenVariant::Capture(items.to_vec().into_boxed_slice())
@@ -89,9 +98,9 @@ impl Token {
     }
 }
 
-/// a transition in the trie
+/// a non-reflexive transition in the trie-like structure
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum MatchUnit {
+pub enum Transition {
     /// token literal was matched
     Literal(TokenVariant),
     CaptureString,
@@ -99,8 +108,6 @@ pub enum MatchUnit {
     CaptureIdentifier,
     /// index N on capture stack was matched
     Backref(usize),
-    /// matches 0 or more times
-    Continuation,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -151,12 +158,27 @@ struct PatternInfo {
     group: String,
 }
 
+#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+enum ReflexiveTransition {
+    /// lack of a transition
+    #[default]
+    None,
+    /// ellipsis operator not contained in any brackets
+    NormalEllipsis,
+    /// ellipsis operator contained in specified type of brackets
+    ContainedEllipsis(BracketType),
+    /// similar to normal, but scope blocking enabled
+    SBE,
+}
+
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 struct TrieNode {
     /// empty if no complete matches
     full_match: Vec<PatternInfo>,
     /// associate transition with next trie index
-    next: HashMap<MatchUnit, usize>,
+    next: HashMap<Transition, usize>,
+    /// reflexive transition
+    reflexive: ReflexiveTransition,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -201,6 +223,9 @@ impl Trie {
 
         let mut captures: HashMap<Box<[u8]>, usize> = Default::default();
         let mut capture_count_increment = 0;
+
+        // used to determine if ... is contained in what type of brackets
+        let mut bracket_stack: Vec<BracketType> = Default::default();
 
         loop {
             let token = match canonicalizer.next_and_drain(|| {
@@ -266,50 +291,162 @@ impl Trie {
                 }
             };
 
-            let transition: MatchUnit = match token.variant {
-                TokenVariant::Ellipsis => MatchUnit::Continuation,
+            #[derive(Debug, PartialEq, Eq)]
+            enum ReflexiveTransitionEnum {
+                None,
+                Some(BracketType),
+                SBE,
+            }
+
+            enum PatternProduct {
+                Transition(Transition),
+                ReflexiveTransition(ReflexiveTransitionEnum),
+            }
+
+            let product = match token.variant {
+                TokenVariant::OverlongIdentifier
+                | TokenVariant::OverlongNumber
+                | TokenVariant::OverlongString
+                | TokenVariant::OverlongCapture => unreachable!(), // discarded above
+                TokenVariant::Byte(b) => {
+                    let maybe_bracket_open = match b {
+                        b'{' => Some(BracketType::Curly),
+                        b'[' => Some(BracketType::Square),
+                        b'(' => Some(BracketType::Round),
+                        // corner brackets not used here. see cbee
+                        _ => None, // not a bracket byte from the pattern
+                    };
+
+                    if let Some(bracket_type) = maybe_bracket_open {
+                        bracket_stack.push(bracket_type);
+                    }
+
+                    let maybe_bracket_close = match b {
+                        b'}' => Some(BracketType::Curly),
+                        b']' => Some(BracketType::Square),
+                        b')' => Some(BracketType::Round),
+                        _ => None,
+                    };
+
+                    if let Some(bracket_type) = maybe_bracket_close {
+                        let mut eq = false;
+                        if let Some(pushed_type) = bracket_stack.last() {
+                            if bracket_type == *pushed_type {
+                                eq = true;
+                            }
+                        }
+
+                        if eq {
+                            bracket_stack.pop();
+                        }
+                    }
+                    PatternProduct::Transition(Transition::Literal(token.variant))
+                }
+                TokenVariant::Ellipsis(ellipsis_type) => match ellipsis_type {
+                    EllipsisEnum::Normal => match bracket_stack.last() {
+                        Some(bracket_type) => PatternProduct::ReflexiveTransition(
+                            ReflexiveTransitionEnum::Some(*bracket_type),
+                        ),
+                        None => PatternProduct::ReflexiveTransition(ReflexiveTransitionEnum::None),
+                    },
+                    EllipsisEnum::CBE => PatternProduct::ReflexiveTransition(
+                        ReflexiveTransitionEnum::Some(BracketType::Corner),
+                    ),
+                    EllipsisEnum::SBE => {
+                        PatternProduct::ReflexiveTransition(ReflexiveTransitionEnum::SBE)
+                    }
+                },
                 TokenVariant::Capture(items) => {
-                    match captures.get(&items) {
+                    PatternProduct::Transition(match captures.get(&items) {
                         Some(ref_num) => {
                             // capture was stated previously, this is a
                             // backreference
-                            MatchUnit::Backref(*ref_num)
+                            Transition::Backref(*ref_num)
                         }
                         None => {
                             // this capture hasn't been seen yet
                             let ret = match items[0] {
-                                b'&' => MatchUnit::CaptureIdentifier,
-                                b'#' => MatchUnit::CaptureNumber,
-                                b'$' => MatchUnit::CaptureString,
+                                b'&' => Transition::CaptureIdentifier,
+                                b'#' => Transition::CaptureNumber,
+                                b'$' => Transition::CaptureString,
                                 _ => unreachable!(),
                             };
                             captures.insert(items.into(), capture_count_increment);
                             capture_count_increment += 1;
                             ret
                         }
-                    }
+                    })
                 }
-                TokenVariant::OverlongIdentifier
-                | TokenVariant::OverlongNumber
-                | TokenVariant::OverlongString
-                | TokenVariant::OverlongCapture => unreachable!(), // discarded above
-                _ => MatchUnit::Literal(token.variant),
+                _ => PatternProduct::Transition(Transition::Literal(token.variant)),
             };
 
-            if matches!(transition, MatchUnit::Continuation) {
-                trie.nodes[trie_position] // reflexive transition
-                    .next
-                    .insert(MatchUnit::Continuation, usize::MAX); // value never used here, implied from Continuation
-            } else {
-                let len = trie.nodes.len();
-                match trie.nodes[trie_position].next.entry(transition) {
-                    std::collections::hash_map::Entry::Occupied(occupied_entry) => {
-                        trie_position = *occupied_entry.get(); // go to the existing node
+            match product {
+                PatternProduct::Transition(transition) => {
+                    let len = trie.nodes.len();
+                    match trie.nodes[trie_position].next.entry(transition) {
+                        std::collections::hash_map::Entry::Occupied(occupied_entry) => {
+                            trie_position = *occupied_entry.get(); // go to the existing node
+                        }
+                        std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                            vacant_entry.insert(len); // create transition
+                            trie_position = len;
+                            trie.nodes.push(Default::default()); // create node
+                        }
                     }
-                    std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                        vacant_entry.insert(len); // create transition
-                        trie_position = len;
-                        trie.nodes.push(Default::default()); // create node
+                }
+                PatternProduct::ReflexiveTransition(reflexive_transition) => {
+                    let other_reflexive = trie.nodes[trie_position].reflexive;
+                    let ok = match other_reflexive {
+                        ReflexiveTransition::None => {
+                            trie.nodes[trie_position].reflexive = match reflexive_transition {
+                                ReflexiveTransitionEnum::None => {
+                                    ReflexiveTransition::NormalEllipsis
+                                }
+                                ReflexiveTransitionEnum::Some(bracket_type) => {
+                                    ReflexiveTransition::ContainedEllipsis(bracket_type)
+                                }
+                                ReflexiveTransitionEnum::SBE => ReflexiveTransition::SBE,
+                            };
+                            true
+                        }
+                        ReflexiveTransition::NormalEllipsis => {
+                            reflexive_transition == ReflexiveTransitionEnum::None
+                        }
+                        ReflexiveTransition::ContainedEllipsis(bracket_type) => {
+                            reflexive_transition == ReflexiveTransitionEnum::Some(bracket_type)
+                        }
+                        ReflexiveTransition::SBE => {
+                            reflexive_transition == ReflexiveTransitionEnum::SBE
+                        }
+                    };
+
+                    if !ok {
+                        // this is a limitation to the pattern matching engine -
+                        // only one type of reflexive transition is allowed per
+                        // node.
+                        //
+                        // for example if there are two patterns:
+                        // - vector<...> abc;
+                        // - vector<..>> abc;
+                        //
+                        // they have the same set of tokens reaching a node, and
+                        // then they are requesting a different type of
+                        // reflexive transition on that same node
+                        //
+                        // in this and a vast majority of cases, one of the two
+                        // patterns was written incorrectly. for this example
+                        // the first one is wrong
+                        //
+                        // but there could be cases where both are valid:
+                        // - < ... > meaning match any less than greater span
+                        // - < ..> > meaning match any template arg list
+                        //
+                        // that case seems very weird to me and unlikely to pop
+                        // up in practice. but if it does, then the trie node
+                        // struct can be changed to accomodate
+                        return Err(
+                            "only one type of reflexive transition is allowed per node".to_string()
+                        );
                     }
                 }
             }
@@ -322,10 +459,17 @@ pub struct PartialMatch {
     /// byte offset in input
     pub start_position: Position,
     pub trie_position: usize,
-    /// not used by pythonic. influenced by {}
-    pub ellipsis_lexical_lock_count: u32,
-    /// influenced by ()
-    pub ellipsis_round_lock_count: u32,
+
+    /// indicates that bracket_count:
+    ///  - is being used in an ellipsis not within bracket
+    ///  - non pythonic language and lexical scope change
+    ///
+    /// allows for lexical scope bypass in too-long and too-short rules
+    pub bracket_count_is_lexical: bool,
+
+    /// enforce too-long and too-short rules
+    pub bracket_count: usize,
+
     // rc since it's likely to be passed unchanged between transitions
     //
     // Arc for downstream project - so Matcher can be sent between threads
@@ -411,7 +555,6 @@ impl<'trie> Matcher<'trie> {
         mut out: impl FnMut(FullMatch),
     ) -> Result<(), String> {
         debug_assert!(!lexer.configured_for_pattern());
-        let pythonic = lexer.pythonic_scopes();
 
         loop {
             let token = match self.canonicalizer.next_and_drain(|| {
@@ -428,13 +571,13 @@ impl<'trie> Matcher<'trie> {
                 }
             };
 
-            debug_assert!(!matches!(token.variant, TokenVariant::Ellipsis));
+            debug_assert!(!matches!(token.variant, TokenVariant::Ellipsis(_)));
             debug_assert!(!matches!(token.variant, TokenVariant::Capture(_)));
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
             let mut grouper = std::mem::take(&mut self.grouper);
-            self.step_token(token, pythonic, |full_match| {
+            self.step_token(token, |full_match| {
                 grouper.process(full_match, &mut out);
             });
             std::mem::swap(&mut grouper, &mut self.grouper); // put it back
@@ -444,7 +587,6 @@ impl<'trie> Matcher<'trie> {
     /// use after process(). drains internal state; signals eof
     pub fn drain<L: Lexer>(&mut self, lexer: &mut L, mut out: impl FnMut(FullMatch)) {
         debug_assert!(!lexer.configured_for_pattern());
-        let pythonic = lexer.pythonic_scopes();
 
         loop {
             let token = match self.canonicalizer.next_and_drain(|| {
@@ -462,13 +604,13 @@ impl<'trie> Matcher<'trie> {
                 },
             };
 
-            debug_assert!(!matches!(token.variant, TokenVariant::Ellipsis));
+            debug_assert!(!matches!(token.variant, TokenVariant::Ellipsis(_)));
             debug_assert!(!matches!(token.variant, TokenVariant::Capture(_)));
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
             let mut grouper = std::mem::take(&mut self.grouper);
-            self.step_token(token, pythonic, |full_match| {
+            self.step_token(token, |full_match| {
                 grouper.process(full_match, &mut out);
             });
             std::mem::swap(&mut grouper, &mut self.grouper); // put it back
@@ -485,7 +627,6 @@ impl<'trie> Matcher<'trie> {
         mut out: impl FnMut(FullMatch),
     ) -> Result<(), String> {
         debug_assert!(!lexer.configured_for_pattern());
-        let pythonic = lexer.pythonic_scopes();
 
         loop {
             let token = match self.canonicalizer.next(|| {
@@ -499,13 +640,13 @@ impl<'trie> Matcher<'trie> {
                 None => return Ok(()),
             };
 
-            debug_assert!(!matches!(token.variant, TokenVariant::Ellipsis));
+            debug_assert!(!matches!(token.variant, TokenVariant::Ellipsis(_)));
             debug_assert!(!matches!(token.variant, TokenVariant::Capture(_)));
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
             let mut grouper = std::mem::take(&mut self.grouper);
-            self.step_token(token, pythonic, |full_match| {
+            self.step_token(token, |full_match| {
                 grouper.process(full_match, &mut out);
             });
             std::mem::swap(&mut grouper, &mut self.grouper); // put it back
@@ -516,7 +657,7 @@ impl<'trie> Matcher<'trie> {
     /// matches
     ///
     /// out lambda is FullMatch, generalization, specialization
-    fn step_token(&mut self, token: Token, pythonic_scopes: bool, mut out: impl FnMut(FullMatch)) {
+    fn step_token(&mut self, token: Token, mut out: impl FnMut(FullMatch)) {
         let mut next_matches: BinaryHeap<PartialMatch> =
             BinaryHeap::with_capacity(self.max_concurrent_matches);
 
@@ -527,7 +668,6 @@ impl<'trie> Matcher<'trie> {
             next_matches: &mut BinaryHeap<PartialMatch>,
             max_concurrent_matches: usize,
             out: &mut impl FnMut(FullMatch),
-            pythonic_scopes: bool,
         ) {
             fn handle_partial_match(
                 next_matches: &mut BinaryHeap<PartialMatch>,
@@ -589,7 +729,6 @@ impl<'trie> Matcher<'trie> {
                                                     .into_boxed_slice();
 
                                                 if let Some(e) = map.get(name.as_bytes()) {
-                                                    println!("{:?}   {:?}", *e, bytes);
                                                     if *e != bytes {
                                                         // named capture group matching capture must match
                                                         continue 'outer;
@@ -620,7 +759,7 @@ impl<'trie> Matcher<'trie> {
 
             fn handle_capture_and_backrefs(
                 items: &[u8],
-                capture_unit: MatchUnit,
+                capture_unit: Transition,
                 current: &PartialMatch,
                 input: &Token,
                 trie: &Trie,
@@ -638,8 +777,8 @@ impl<'trie> Matcher<'trie> {
                         start_position: current.start_position,
                         trie_position: *v,
                         capture_stack: new_stack,
-                        ellipsis_lexical_lock_count: current.ellipsis_lexical_lock_count,
-                        ellipsis_round_lock_count: current.ellipsis_round_lock_count,
+                        bracket_count_is_lexical: Default::default(),
+                        bracket_count: Default::default(),
                     };
 
                     handle_maybe_full_match(trie, &m, input, out);
@@ -651,14 +790,14 @@ impl<'trie> Matcher<'trie> {
                     if *items == ***cap {
                         if let Some(v) = trie.nodes[current.trie_position]
                             .next
-                            .get(&MatchUnit::Backref(i))
+                            .get(&Transition::Backref(i))
                         {
                             let m = PartialMatch {
                                 start_position: current.start_position,
                                 trie_position: *v,
                                 capture_stack: current.capture_stack.clone(),
-                                ellipsis_lexical_lock_count: current.ellipsis_lexical_lock_count,
-                                ellipsis_round_lock_count: current.ellipsis_round_lock_count,
+                                bracket_count: Default::default(),
+                                bracket_count_is_lexical: Default::default(),
                             };
 
                             handle_maybe_full_match(trie, &m, input, out);
@@ -668,21 +807,20 @@ impl<'trie> Matcher<'trie> {
                 }
             }
 
-            if current.ellipsis_round_lock_count != 0 {
-                // the ... operator is not allowed to only match one side of an
-                // arg list, it must match both the ( thru )
+            if current.bracket_count != 0 && !current.bracket_count_is_lexical {
+                // blocked by NOT TOO SHORT rule
             } else {
                 // attempt literal transition
                 match trie.nodes[current.trie_position]
                     .next
-                    .get(&MatchUnit::Literal(input.variant.clone()))
+                    .get(&Transition::Literal(input.variant.clone()))
                 {
                     Some(v) => {
                         let m = PartialMatch {
                             start_position: current.start_position,
                             trie_position: *v,
-                            ellipsis_lexical_lock_count: current.ellipsis_lexical_lock_count,
-                            ellipsis_round_lock_count: current.ellipsis_round_lock_count,
+                            bracket_count: Default::default(),
+                            bracket_count_is_lexical: Default::default(),
                             capture_stack: current.capture_stack.clone(), // rc
                         };
                         handle_maybe_full_match(trie, &m, &input, out);
@@ -695,7 +833,7 @@ impl<'trie> Matcher<'trie> {
                     TokenVariant::Number(items) => {
                         handle_capture_and_backrefs(
                             items,
-                            MatchUnit::CaptureNumber,
+                            Transition::CaptureNumber,
                             &current,
                             &input,
                             trie,
@@ -708,7 +846,7 @@ impl<'trie> Matcher<'trie> {
                     TokenVariant::Identifier(items) => {
                         handle_capture_and_backrefs(
                             items,
-                            MatchUnit::CaptureIdentifier,
+                            Transition::CaptureIdentifier,
                             &current,
                             &input,
                             trie,
@@ -721,7 +859,7 @@ impl<'trie> Matcher<'trie> {
                     TokenVariant::String(items) => {
                         handle_capture_and_backrefs(
                             items,
-                            MatchUnit::CaptureString,
+                            Transition::CaptureString,
                             &current,
                             &input,
                             trie,
@@ -735,50 +873,83 @@ impl<'trie> Matcher<'trie> {
                 }
             }
 
-            // attempt continuation transition
-            if trie.nodes[current.trie_position]
-                .next
-                .contains_key(&MatchUnit::Continuation)
-            {
-                let mut next = current;
-                let mut continuation_valid = true;
-                match input.variant {
-                    TokenVariant::Byte(b'(') | TokenVariant::Byte(b'[') | TokenVariant::Byte(b'<') => {
-                        next.ellipsis_round_lock_count += 1;
-                    }
-                    TokenVariant::Byte(b')') | TokenVariant::Byte(b']') | TokenVariant::Byte(b'>') => {
-                        if next.ellipsis_round_lock_count == 0 {
-                            continuation_valid = false;
-                        } else {
-                            next.ellipsis_round_lock_count -= 1;
-                        }
-                    }
-                    TokenVariant::LexicalLevelChange(change) => {
-                        if pythonic_scopes {
-                            // python don't care
-                        } else {
-                            match next
-                                .ellipsis_lexical_lock_count
-                                .checked_add_signed(change as i32)
-                            {
-                                Some(v) => {
-                                    next.ellipsis_lexical_lock_count = v;
-                                }
-                                None => {
-                                    continuation_valid = false;
+            // handle maybe reflexive transition
+            let (maybe_bracket, sbe) = match trie.nodes[current.trie_position].reflexive {
+                ReflexiveTransition::NormalEllipsis => (None, false),
+                ReflexiveTransition::ContainedEllipsis(bracket_type) => (Some(bracket_type), false),
+                ReflexiveTransition::SBE => (None, true),
+                _ => return, // no reflexive here
+            };
+
+            let mut next = current;
+            // check for NOT TOO LONG rule
+            let mut continuation_valid = true;
+            match input.variant {
+                TokenVariant::Byte(b) => {
+                    let vals = match maybe_bracket {
+                        None => {
+                            if !sbe {
+                                None
+                            } else {
+                                // make not-too-long rule apply for curly
+                                // brackets
+                                match b {
+                                    b'{' => Some(1),
+                                    b'}' => Some(-1),
+                                    _ => None,
                                 }
                             }
                         }
-                    }
-                    _ => {}
-                }
+                        Some(bracket) => match bracket {
+                            BracketType::Round => match b {
+                                b'(' => Some(1),
+                                b')' => Some(-1),
+                                _ => None,
+                            },
+                            BracketType::Square => match b {
+                                b'[' => Some(1),
+                                b']' => Some(-1),
+                                _ => None,
+                            },
+                            BracketType::Corner => match b {
+                                b'<' => Some(1),
+                                b'>' => Some(-1),
+                                _ => None,
+                            },
+                            BracketType::Curly => match b {
+                                b'{' => Some(1),
+                                b'}' => Some(-1),
+                                _ => None,
+                            },
+                        },
+                    };
 
-                if continuation_valid {
-                    handle_partial_match(next_matches, max_concurrent_matches, next);
-                } else {
-                    // the ... operator is not allowed to expand into the parent
-                    // {} bracket scope
+                    if let Some(delta) = vals {
+                        match next.bracket_count.checked_add_signed(delta) {
+                            Some(v) => {
+                                if sbe {
+                                    if v == 0 {
+                                        next.bracket_count_is_lexical = false;
+                                    } else if b == b'{' {
+                                        next.bracket_count_is_lexical = true;
+                                    }
+                                }
+                                next.bracket_count = v;
+                            }
+                            None => {
+                                continuation_valid = false;
+                            }
+                        }
+                    }
                 }
+                _ => {}
+            }
+
+            if continuation_valid {
+                handle_partial_match(next_matches, max_concurrent_matches, next);
+            } else {
+                // too long rule failed. the ... operator is not allowed to
+                // expand into the parent bracket scope
             }
         }
 
@@ -790,7 +961,6 @@ impl<'trie> Matcher<'trie> {
                 &mut next_matches,
                 self.max_concurrent_matches,
                 &mut out,
-                pythonic_scopes,
             );
         }
 
@@ -801,7 +971,6 @@ impl<'trie> Matcher<'trie> {
             &mut next_matches,
             self.max_concurrent_matches,
             &mut out,
-            pythonic_scopes,
         );
 
         self.matches = next_matches;
@@ -1167,6 +1336,91 @@ other_function( (), x, () );
     }
 
     #[test]
+    fn corner_brackets_ignored() {
+        // without proper bracket scope handling, 3 matches would appear, when
+        // only 1 is correct
+        run_matcher_test(
+            Language::RustLike,
+            &[(
+                "corner_brackets_ignored",
+                br#"
+match ... { ... }
+"#,
+            )],
+            br#"
+match value {
+    1 => println!("yes"),
+    _ => println!("no"),
+}
+"#,
+            vec![FullMatch {
+                start: Position {
+                    offset: 1,
+                    column: 1,
+                    line: 2,
+                },
+                end: Position {
+                    offset: 67,
+                    column: 2,
+                    line: 5,
+                },
+                name: "corner_brackets_ignored".to_string(),
+                group: "".to_string(),
+                captures: Default::default(),
+            }],
+        );
+    }
+
+    #[test]
+    fn corner_bracket_aware() {
+        run_matcher_test(
+            Language::CLike,
+            &[(
+                "corner_brackets_aware",
+                br#"
+vector<..>>
+"#,
+            )],
+            br#"
+vector<int> a; vector<int> b;
+"#,
+            // two matches, not three
+            vec![
+                FullMatch {
+                    start: Position {
+                        offset: 1,
+                        column: 1,
+                        line: 2,
+                    },
+                    end: Position {
+                        offset: 12,
+                        column: 12,
+                        line: 2,
+                    },
+                    name: "corner_brackets_aware".to_string(),
+                    group: "".to_string(),
+                    captures: Default::default(),
+                },
+                FullMatch {
+                    start: Position {
+                        offset: 16,
+                        column: 16,
+                        line: 2,
+                    },
+                    end: Position {
+                        offset: 27,
+                        column: 27,
+                        line: 2,
+                    },
+                    name: "corner_brackets_aware".to_string(),
+                    group: "".to_string(),
+                    captures: Default::default(),
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn ellipsis_lexical_scope_brackets() {
         run_matcher_test(
             Language::CLike,
@@ -1174,7 +1428,7 @@ other_function( (), x, () );
                 "lexical_brackets",
                 br#"
 let &VAR = #NUM;
-...
+..}
 test(&VAR);
                 "#,
             )],

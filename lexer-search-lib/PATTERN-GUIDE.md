@@ -31,7 +31,7 @@ something(0); // DIFFERENT
 ```
 
 Other than matching token literals, the pattern syntax also provide
-[captures](#captures) and the `...` [ellipsis operator](#ellipsis-operator).
+[captures](#captures) and the [ellipsis operators](#ellipsis-operators).
 
 ## Captures
 
@@ -61,22 +61,76 @@ capture.
 > [!TIP]  
 > - A capture name prefixed by `_` is suppressed from the output but will still
 >   be used by the [transform](#transform). e.g. `$_ABC`.
-> - The prefix character can be escaped via whitespace. e.g. `& ABC` matches the literals `&` then `ABC`.
+> - The prefix character can be escaped via whitespace. e.g. `& ABC` matches the
+>   literals `&` then `ABC`.
 > - Capture names should be short and UPPERCASE.
 
-## Ellipsis Operator
+## Ellipsis Operators
 
-The `...` operator matches zero or more lexer tokens, but there is special
-handling for brackets:
+The ellipsis operators match zero or more lexer tokens. For example: `test(...)`
+matches `test(1, 2, 3)`.
 
-- In non-python like languages, the `...` operator can't match tokens in the
-  parent lexical scope. This better matches how declarations are only available in
-  the same or child lexical scopes.
-- The `...` operator can't match tokens outside of the parent round brackets.
-  This better handles arguments with no strict positioning.
+Ellipsis operators can be declared inside brackets or outside brackets. Here's
+the ways they can be declared inside brackets: `(...)`, `[...]`, `{...}`, or `<
+..> >`. LexerSearch doesn't parse. This leads to ambiguity regarding corner
+brackets. `>` could represent a "greater than" comparison, or it could represent
+the closing of a template argument list in languages like Rust or C++, e.g.
+`vector<int>`. LexerSearch's pattern language has the author resolve the
+ambiguity, like: `vector< ..> >`. The `..>` is the corner bracket ellipsis. This
+indicates that the ellipsis operator is contained inside corner brackets. It is
+deduced for other types of brackets.
 
-> [!TIP]  
-> - `...` can be escaped via whitespace, like `. . .`. 
+### Not Too Short
+
+When declared in brackets, the ellipsis operators match from an open bracket to
+the corresponding close bracket. This better handles nested brackets. For
+example rule `test(...)`:
+
+```c
+// don't stop early at first ')'
+//        V
+   test( (), y, () )
+```
+
+### Not Too Long
+
+When declared in brackets they can't escape out of the bracket scope. For the
+example rule `test(...)`:
+
+```c
+// first match ends where it should
+//             V
+   test(1, 2, 3); test(4, 5, 6);
+//                            ^
+// and doesn't continue to here
+```
+
+#### Scope Blocking
+
+As mentioned above, the "not too long" rule applies inside brackets. However,
+there is a useful extra place to make this rule apply:
+
+- ellipsis not declared in brackets
+- lexical bracket reached
+  - curly `{}`
+  - non python-like language scopes
+
+The scope blocking ellipsis ensures that variable declaration aren't accessible
+in the parent lexical scope:
+
+```
+let &VAR = #NUM;
+..}
+test(&VAR);
+```
+
+```rust
+let x = 123; // yes!
+{
+  let x = 456; // no!
+}
+test(x);
+```
 
 # Languages
 
@@ -124,7 +178,9 @@ capture's name (e.g. name "ABC" for capture "$ABC") with a
 content does not match the expression then the match is discarded.
 
 If the regex matches "named capture groups" (like `(?<ALG>.+)`) then they will
-populate the output. If the named capture group's name matches the capture's name then the matched values must be equal to accept a match. In this example the match is accepted because both contain "x":
+populate the output. If the named capture group's name matches the capture's
+name then the matched values must be equal to accept a match. In this example
+the match is accepted because both contain "x":
 
 ```rust
 let x = "hi";
@@ -135,7 +191,7 @@ println!("{x}");
 patterns:
   - >
     &_VAR = $_STR;
-    ...
+    ..}
     println!($_FMT)
 languages:
   - rust
@@ -227,7 +283,7 @@ group: java_key
 patterns: # key size from anchor
   - >
     &_VAR = KeyPairGenerator.getInstance(&_ARG ...)
-    ...
+    ..}
     &_VAR.initialize(#KEY_SIZE)
 languages:
   - java
@@ -238,7 +294,7 @@ group: java_key
 patterns: # alg name from anchor
   - >
     String &_VAR = $ALG;
-    ...
+    ..}
     KeyPairGenerator.getInstance(&_VAR ...)
 languages:
   - java

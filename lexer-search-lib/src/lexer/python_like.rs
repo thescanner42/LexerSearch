@@ -3,7 +3,7 @@ use std::num::NonZero;
 use super::c_like::{QuoteType, StringEscaped};
 
 use crate::lexer::{
-    LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset,
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset
 };
 
 use super::utf8_multibyte_part;
@@ -193,10 +193,6 @@ impl LexerEnum {
 }
 
 impl super::Lexer for Lexer {
-    fn pythonic_scopes(&self) -> bool {
-        true
-    }
-
     fn next<'state, R: std::io::Read>(
         &'state mut self,
         r: &mut R,
@@ -621,9 +617,16 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' {
+                        if byte == b'.' || byte == b'>' {
                             self.state = LexerEnum::NotLineStart;
-                            return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis)));
+                            let t = match byte {
+                                b'.' => EllipsisEnum::Normal,
+                                b'>' => EllipsisEnum::CBE,
+                                // not applicable since python doesn't have scopes
+                                // b'}' => EllipsisEnum::SBEE,
+                                _ => unreachable!(),
+                            };
+                            return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis(t))));
                         } else {
                             //    V
                             // ..?
@@ -873,7 +876,7 @@ mod ellipsis_capture_tests {
 
         let token = lexer.next(&mut c).unwrap().unwrap();
         match token.variant {
-            LexerTokenVariant::Ellipsis => {}
+            LexerTokenVariant::Ellipsis(EllipsisEnum::Normal) => {}
             _ => panic!("expected ellipsis token"),
         }
 
