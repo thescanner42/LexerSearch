@@ -1,0 +1,26 @@
+patterns:
+- |-
+  #[test]
+  fn &_(...) {...}
+- |-
+  #[test]
+  #[...]
+  fn &_(...) {...}
+- |-
+  #[test]
+  #[...]
+  #[...]
+  fn &_(...) {...}
+- |-
+  #[test]
+  #[...]
+  #[...]
+  #[...]
+  fn &_(...) {...}
+name: test_fn
+group: assert_not_in_fn
+languages:
+  - rust
+out:
+  ignore: 'true'
+transform: {}

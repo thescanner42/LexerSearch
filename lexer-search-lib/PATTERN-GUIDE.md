@@ -277,7 +277,7 @@ patterns: # "anchor" pattern
 languages:
   - java
 group: java_key
-
+name: anchor
 ```
 ```yaml
 patterns: # key size from anchor
@@ -287,7 +287,6 @@ patterns: # key size from anchor
     &_VAR.initialize(#KEY_SIZE)
 languages:
   - java
-name: size
 group: java_key
 ```
 ```yaml
@@ -315,13 +314,16 @@ The above rules together produce a single match:
 }
 ```
 
-Matches merge when:  
- - the groups are equal
- - a match's span starts or ends at the same position as another
- - and the name has not already been merged
+Matches merge when the groups are equal, and between the match and the
+intersection of the matches already in the finding group, the span of one must
+cover the other.
 
-As a best practice, a group should always have an "anchor" pattern with a
-relatively small span.
+When a match merges into a finding group, the captures are merged together in
+the output and the span is the union of all the matches.
+
+If a match with the same name has already been added to a group, the latter
+match evicts the previous match. However, if the name is empty or unstated, this
+instead duplicates the group and only evicts for one of them.
 
 # Examples
 

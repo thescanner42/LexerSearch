@@ -1,0 +1,11 @@
+patterns:
+  - >
+    &_VAR = KeyPairGenerator.getInstance(...)
+    ..}
+    &_VAR.enable()
+languages:
+  - java
+out: # tests association on each finding
+  enabled: ''
+name: java_key_enabled
+group: java_key

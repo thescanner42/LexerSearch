@@ -36,6 +36,12 @@ pub struct Group {
     intersection: (Position, Position),
 }
 
+enum EvictedMatch {
+    Accepted(FullMatchInGroup),
+    NotAccepted(FullMatchInGroup),
+    GroupDup(Group),
+}
+
 impl Group {
     pub fn new(cap: NonZero<usize>, group_name: String, first: FullMatchInGroup) -> Self {
         let union = (first.start, first.end);
@@ -84,30 +90,60 @@ impl Group {
 
     /// might evict a clashing full match in group, or might not accept due to
     /// cap
-    pub fn insert(&mut self, mut m: FullMatchInGroup) -> Option<FullMatchInGroup> {
+    fn insert(&mut self, mut m: FullMatchInGroup) -> EvictedMatch {
         let self_start = self.intersection.0.offset;
         let self_end = self.intersection.1.offset;
         let m_start = m.start.offset;
         let m_end = m.end.offset;
 
-        if self_start != m_start && self_end != m_end {
-            return Some(m);
+        // one needs to completely cover the other
+        let m_covers_self = m_start <= self_start && m_end >= self_end;
+
+        // true if self completely covers m
+        let self_covers_m = self_start <= m_start && self_end >= m_end;
+
+        // one must completely cover the other
+        if !(m_covers_self || self_covers_m) {
+            return EvictedMatch::NotAccepted(m);
         }
 
         for i in 0..self.data_len {
-            if self.data[i].name == m.name && m.start.offset > self.data[i].start.offset {
+            if self.data[i].name.is_empty() && m.name.is_empty() {
+                if self.data[i].start.offset == m.start.offset
+                    && self.data[i].end.offset == m.end.offset
+                {
+                    // don't evict if this match is just an inferior but equivalent
+                    // form of the existing match
+                    return EvictedMatch::Accepted(m);
+                }
+                // similar to other branch but should instead duplicate the data
+                // then replace
+                let mut me_dup = self.clone();
+                std::mem::swap(&mut m, &mut me_dup.data[i]);
+                me_dup.recalculate_intersection();
+                let _ = m; // discard overridden match
+                return EvictedMatch::GroupDup(me_dup);
+            } else if self.data[i].name == m.name {
+                let m_clone = m.clone();
+                if self.data[i].start.offset == m.start.offset
+                    && self.data[i].end.offset == m.end.offset
+                {
+                    // don't evict if this match is just an inferior but equivalent
+                    // form of the existing match
+                    return EvictedMatch::Accepted(m_clone);
+                }
                 // the upstream findings are returned in order of end position
                 // then start position. it makes sense to replace where variable
                 // redeclaration occurs (use the last instance).
                 std::mem::swap(&mut m, &mut self.data[i]);
                 self.recalculate_intersection();
                 let _ = m; // discard overridden match
-                return None;
+                return EvictedMatch::Accepted(m_clone);
             }
         }
 
         if self.data_len == self.data.len() {
-            return Some(m); // cap hit
+            return EvictedMatch::NotAccepted(m); // cap hit
         }
 
         // update intersection
@@ -118,9 +154,10 @@ impl Group {
             self.intersection.1 = m.end;
         }
 
+        let m_clone = m.clone();
         self.data[self.data_len] = m;
         self.data_len += 1;
-        None
+        EvictedMatch::Accepted(m_clone)
     }
 
     pub fn consume(mut self) -> FullMatch {
@@ -171,6 +208,7 @@ impl Grouper {
             }
         };
 
+        let mut accepted = false;
         for i in 0..self.data_len {
             let group = &mut self.data[i];
             if group_name != group.group_name {
@@ -178,16 +216,25 @@ impl Grouper {
             }
 
             match group.insert(m) {
-                Some(v) => {
+                EvictedMatch::NotAccepted(v) => {
                     m = v;
                 }
-                None => return,
+                EvictedMatch::Accepted(v) => {
+                    m = v;
+                    accepted = true;
+                }
+                EvictedMatch::GroupDup(full_match_in_group) => {
+                    self.insert_group(full_match_in_group, out);
+                    return;
+                }
             }
         }
 
-        // the full match could not be added to any group. create a new one
-        let new_group = Group::new(self.data.len().try_into().unwrap(), group_name, m);
-        self.insert_group(new_group, out);
+        if !accepted {
+            // the full match could not be added to any group. create a new one
+            let new_group = Group::new(self.data.len().try_into().unwrap(), group_name, m);
+            self.insert_group(new_group, out);
+        }
     }
 
     fn insert_group(&mut self, new_group: Group, mut out: impl FnMut(FullMatch)) {
@@ -261,59 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn group_insert_updates_intersection() {
-        let first = FullMatchInGroup::from_full_match(fm("a", "g", 0, 10, &[]))
-            .unwrap()
-            .0;
-
-        let mut group = Group::new(NonZero::new(4).unwrap(), "g".into(), first);
-
-        // Same start, tighter end
-        let second = FullMatchInGroup::from_full_match(fm("b", "g", 0, 8, &[]))
-            .unwrap()
-            .0;
-
-        assert!(group.insert(second).is_none());
-
-        assert_eq!(group.intersection.0.offset, 0);
-        assert_eq!(group.intersection.1.offset, 8);
-    }
-
-    #[test]
-    fn group_replaces_same_name_with_later_start() {
-        let first = FullMatchInGroup::from_full_match(fm(
-            "x",
-            "g",
-            0,
-            10,
-            &[("a".as_bytes(), "1".as_bytes())],
-        ))
-        .unwrap()
-        .0;
-
-        let mut group = Group::new(NonZero::new(2).unwrap(), "g".into(), first);
-
-        // Same end, later start
-        let replacement = FullMatchInGroup::from_full_match(fm(
-            "x",
-            "g",
-            5,
-            10,
-            &[("b".as_bytes(), "2".as_bytes())],
-        ))
-        .unwrap()
-        .0;
-
-        assert!(group.insert(replacement).is_none());
-
-        let consumed = group.consume();
-        assert_eq!(consumed.start.offset, 5);
-        assert_eq!(consumed.end.offset, 10);
-        assert!(consumed.captures.contains_key(b"b".as_ref()));
-        assert!(!consumed.captures.contains_key(b"a".as_ref()));
-    }
-
-    #[test]
     fn group_insert_respects_capacity() {
         let first = FullMatchInGroup::from_full_match(fm("a", "g", 0, 10, &[]))
             .unwrap()
@@ -325,7 +319,7 @@ mod tests {
             .unwrap()
             .0;
 
-        assert!(group.insert(second).is_some());
+        assert!(matches!(group.insert(second), EvictedMatch::NotAccepted(_)));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+patterns: # "anchor" pattern. smallest span
+  - >
+    &_VAR = KeyPairGenerator.getInstance($ALG ...)
+  - >
+    &_VAR = KeyPairGenerator.getInstance(...)
+languages:
+  - java
+group: java_key
+name: anchor

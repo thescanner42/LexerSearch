@@ -1,0 +1,22 @@
+patterns: # key size from anchor
+  - >
+    &_VAR = KeyPairGenerator.getInstance(...)
+    ..}
+    &_VAR.initialize(#KEY_SIZE)
+  - >
+    &_VAR = KeyPairGenerator.getInstance(...)
+    ..}
+    &_V2 = #KEY_SIZE;
+    ..}
+    &_VAR.initialize(&_V2)
+  - >
+    &_V2 = #KEY_SIZE;
+    ..}
+    &_VAR = KeyPairGenerator.getInstance(...)
+    ..}
+    &_VAR.initialize(&_V2)
+languages:
+  - java
+group: java_key
+# no name - each match creates a new finding
+# name: test

@@ -1,0 +1,10 @@
+patterns:
+# grouping rules - make end offset match group offset
+- |-
+  assert_eq!(...);
+name: ''
+group: assert_not_in_fn
+languages:
+  - rust
+out: {}
+transform: {}

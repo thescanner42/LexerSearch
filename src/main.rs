@@ -23,10 +23,15 @@ pub struct Args {
     #[cfg(not(feature = "embed-patterns"))]
     pub patterns_path: PathBuf,
     pub scan_path: PathBuf,
+    /// max simultaneous independent overlapping partial matches
     #[arg(default_value_t = 5000)]
     pub max_concurrent_matches: usize,
+    /// the maximum length of a token. if a token is larger than this specified
+    /// value this will causes non ... sections of a pattern to not match
     #[arg(default_value_t = DEFAULT_MAX_TOKEN_LENGTH)]
     pub max_token_length: NonZeroUsize,
+    /// should be some reasonably small number. specifies both the max number of
+    /// matches per group and the max number of simultaneous groups
     #[arg(default_value_t = 10.try_into().unwrap())]
     pub group_cap: NonZero<usize>,
 }

@@ -1,0 +1,9 @@
+patterns: # alg name from anchor
+  - >
+    String &_VAR = $ALG;
+    ..}
+    KeyPairGenerator.getInstance(&_VAR ...)
+languages:
+  - java
+name: alg
+group: java_key
