@@ -1,0 +1,25 @@
+[package]
+name = "lexer-search"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+default-members = [
+    ".",
+    "lexer-search-lib"
+]
+
+[dependencies]
+lexer-search-lib = { path = "./lexer-search-lib" }
+clap = { version = "4.5", features = ["derive"] }
+bincode = { version = "2.0", features = ["serde"], optional = true }
+serde_json = "1.0.149"
+walkdir = "2.5.0"
+
+[build-dependencies]
+lexer-search-lib = { path = "./lexer-search-lib" }
+bincode = { version = "2.0", features = ["serde"]}
+
+[features]
+embed-patterns = ["bincode"]
+

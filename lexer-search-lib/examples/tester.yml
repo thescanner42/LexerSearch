@@ -1,0 +1,6 @@
+# detects any string
+patterns:
+  - $_STR
+name: my_reasonably_unique_name_here
+languages:
+  - py
