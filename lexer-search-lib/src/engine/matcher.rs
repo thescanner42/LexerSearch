@@ -172,13 +172,19 @@ enum ReflexiveTransition {
 }
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
+struct LoopTransition {
+    transition: usize,
+    capture_pop_count: usize,
+}
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 struct TransitionTo {
     // the normal transition from node to index of next node
     transition: usize,
     /// from ..+
-    /// 
+    ///
     /// generally empty vector
-    loops: Vec<usize>,
+    loops: Vec<LoopTransition>,
 }
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
@@ -230,8 +236,15 @@ impl Trie {
         // always points to a valid index (trie has min len of 1)
         let mut trie_position: usize = 0;
 
+        struct JumpStartInfo {
+            /// node position that is returned to
+            trie_position: usize,
+            /// capture stack number of elements to remove - restore state
+            new_captures_since_start: usize,
+        }
+
         // implement ..+ start pos. contains node pos that is returned to
-        let mut trie_jump_position: Option<usize> = None;
+        let mut trie_jump_position: Option<JumpStartInfo> = None;
         // implement ..+ end pos. info to get to TransitionTo
         let mut previous_transition: Option<(usize, Transition)> = None;
 
@@ -373,11 +386,6 @@ impl Trie {
                     EllipsisEnum::Jump => PatternProduct::Jump,
                 },
                 TokenVariant::Capture(items) => {
-                    if trie_jump_position.is_some() {
-                        // adding to the capture stack is just an append
-                        // operation. should not be allowed to loop
-                        return Err("captures can't occur in a repitition span".to_owned());
-                    }
                     PatternProduct::Transition(match captures.get(&items) {
                         Some(ref_num) => {
                             // capture was stated previously, this is a
@@ -385,6 +393,9 @@ impl Trie {
                             Transition::Backref(*ref_num)
                         }
                         None => {
+                            if let Some(v) = trie_jump_position.as_mut() {
+                                v.new_captures_since_start += 1;
+                            }
                             // this capture hasn't been seen yet
                             let ret = match items[0] {
                                 b'&' => Transition::CaptureIdentifier,
@@ -406,7 +417,10 @@ impl Trie {
                     match trie_jump_position.take() {
                         None => {
                             // mark the current position for later reference
-                            trie_jump_position = Some(trie_position);
+                            trie_jump_position = Some(JumpStartInfo {
+                                trie_position,
+                                new_captures_since_start: 0,
+                            });
                         }
                         Some(v) => {
                             // map - it's possible that there was no previous
@@ -418,7 +432,10 @@ impl Trie {
                                     .get_mut(&loop_pos.1)
                                     .unwrap() // safe since it was added previously
                                     .loops
-                                    .push(v);
+                                    .push(LoopTransition {
+                                        transition: v.trie_position,
+                                        capture_pop_count: v.new_captures_since_start,
+                                    });
                             });
                         }
                     }
@@ -519,7 +536,7 @@ pub struct PartialMatch {
 
     // rc since it's likely to be passed unchanged between transitions
     //
-    // Arc for downstream project - so Matcher can be sent between threads
+    // Arc so Matcher can be sent between threads
     pub capture_stack: Arc<Vec<Arc<Box<[u8]>>>>,
 }
 
@@ -874,12 +891,16 @@ impl<'trie> Matcher<'trie> {
                         handle_partial_match(next_matches, max_concurrent_matches, m);
 
                         for v in v.loops.iter() {
+                            let mut new_capture_stack: Vec<Arc<Box<[u8]>>> =
+                                (*current.capture_stack).clone();
+                            new_capture_stack
+                                .truncate(new_capture_stack.len() - v.capture_pop_count);
                             let m = PartialMatch {
                                 start_position: current.start_position,
-                                trie_position: *v,
+                                trie_position: v.transition,
                                 bracket_count: Default::default(),
                                 bracket_count_is_lexical: Default::default(),
-                                capture_stack: current.capture_stack.clone(), // rc
+                                capture_stack: Arc::new(new_capture_stack),
                             };
                             // handle_maybe_full_match(trie, &m, &input, out); // full match can't happen from ..+
                             handle_partial_match(next_matches, max_concurrent_matches, m);

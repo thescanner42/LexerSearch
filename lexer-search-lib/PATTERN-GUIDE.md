@@ -140,7 +140,7 @@ example:
 ```
 #[test]
 ..+ #[...] ..+
-fn &_(...) {...}
+fn &NAME(...) {...}
 ```
 
 The section surround by `..+` is matched one or more times. The first instance
@@ -148,6 +148,9 @@ of `..+` marks the destination node. The second instance marks the source
 transition. When the source transition is reached, execution is forked with one
 partial match continuing with the remaining parts of the pattern, and the other
 jumping back to the destination node. 
+
+If a repitition section contains the creation of captures then the last time the
+section is matched will be used to populate those captures.
 
 # Languages
 

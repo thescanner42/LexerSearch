@@ -1,11 +1,11 @@
 patterns:
 - |-
   #[test]
-  fn &_(...) {...}
+  fn &_F(...) {...}
 - |-
   #[test] // annotation
   ..+ #[...] ..+ // one or more times
-  fn &_(...) {...} // fn
+  fn &_F(...) {...} // fn
 name: test_fn
 group: assert_not_in_fn
 languages:
