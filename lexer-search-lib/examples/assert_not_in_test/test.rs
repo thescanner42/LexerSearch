@@ -19,3 +19,13 @@ mod tests {
         assert_eq!(1, 1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[should_panic]
+    #[should_panic]
+    fn this_is_a_test() {
+        assert_eq!(1, 1);
+    }
+}

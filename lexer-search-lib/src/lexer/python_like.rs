@@ -617,13 +617,14 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' || byte == b'>' {
+                        if byte == b'.' || byte == b'>' || byte == b'+' {
                             self.state = LexerEnum::NotLineStart;
                             let t = match byte {
                                 b'.' => EllipsisEnum::Normal,
                                 b'>' => EllipsisEnum::CBE,
                                 // not applicable since python doesn't have scopes
                                 // b'}' => EllipsisEnum::SBEE,
+                                b'+' => EllipsisEnum::Jump,
                                 _ => unreachable!(),
                             };
                             return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis(t))));

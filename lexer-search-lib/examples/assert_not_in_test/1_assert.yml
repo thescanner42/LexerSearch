@@ -1,5 +1,4 @@
 patterns:
-# grouping rules - make end offset match group offset
 - |-
   assert_eq!(...);
 name: ''

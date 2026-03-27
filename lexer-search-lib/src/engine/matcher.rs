@@ -172,11 +172,20 @@ enum ReflexiveTransition {
 }
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
+struct TransitionTo {
+    // the normal transition from node to index of next node
+    transition: usize,
+    /// from ..+
+    /// 
+    /// generally empty vector
+    loops: Vec<usize>,
+}
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 struct TrieNode {
     /// empty if no complete matches
     full_match: Vec<PatternInfo>,
-    /// associate transition with next trie index
-    next: HashMap<Transition, usize>,
+    next: HashMap<Transition, TransitionTo>,
     /// reflexive transition
     reflexive: ReflexiveTransition,
 }
@@ -220,6 +229,11 @@ impl Trie {
 
         // always points to a valid index (trie has min len of 1)
         let mut trie_position: usize = 0;
+
+        // implement ..+ start pos. contains node pos that is returned to
+        let mut trie_jump_position: Option<usize> = None;
+        // implement ..+ end pos. info to get to TransitionTo
+        let mut previous_transition: Option<(usize, Transition)> = None;
 
         let mut captures: HashMap<Box<[u8]>, usize> = Default::default();
         let mut capture_count_increment = 0;
@@ -301,6 +315,7 @@ impl Trie {
             enum PatternProduct {
                 Transition(Transition),
                 ReflexiveTransition(ReflexiveTransitionEnum),
+                Jump,
             }
 
             let product = match token.variant {
@@ -355,8 +370,14 @@ impl Trie {
                     EllipsisEnum::SBE => {
                         PatternProduct::ReflexiveTransition(ReflexiveTransitionEnum::SBE)
                     }
+                    EllipsisEnum::Jump => PatternProduct::Jump,
                 },
                 TokenVariant::Capture(items) => {
+                    if trie_jump_position.is_some() {
+                        // adding to the capture stack is just an append
+                        // operation. should not be allowed to loop
+                        return Err("captures can't occur in a repitition span".to_owned());
+                    }
                     PatternProduct::Transition(match captures.get(&items) {
                         Some(ref_num) => {
                             // capture was stated previously, this is a
@@ -381,14 +402,40 @@ impl Trie {
             };
 
             match product {
+                PatternProduct::Jump => {
+                    match trie_jump_position.take() {
+                        None => {
+                            // mark the current position for later reference
+                            trie_jump_position = Some(trie_position);
+                        }
+                        Some(v) => {
+                            // map - it's possible that there was no previous
+                            // transition. in which case the repitition
+                            // shouldn't do anything
+                            previous_transition.as_ref().map(|loop_pos| {
+                                trie.nodes[loop_pos.0]
+                                    .next
+                                    .get_mut(&loop_pos.1)
+                                    .unwrap() // safe since it was added previously
+                                    .loops
+                                    .push(v);
+                            });
+                        }
+                    }
+                }
                 PatternProduct::Transition(transition) => {
+                    previous_transition = Some((trie_position, transition.clone()));
                     let len = trie.nodes.len();
                     match trie.nodes[trie_position].next.entry(transition) {
                         std::collections::hash_map::Entry::Occupied(occupied_entry) => {
-                            trie_position = *occupied_entry.get(); // go to the existing node
+                            trie_position = occupied_entry.get().transition;
                         }
                         std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                            vacant_entry.insert(len); // create transition
+                            vacant_entry.insert(TransitionTo {
+                                // create transition
+                                transition: len,
+                                loops: Default::default(),
+                            });
                             trie_position = len;
                             trie.nodes.push(Default::default()); // create node
                         }
@@ -775,7 +822,7 @@ impl<'trie> Matcher<'trie> {
 
                     let m = PartialMatch {
                         start_position: current.start_position,
-                        trie_position: *v,
+                        trie_position: v.transition,
                         capture_stack: new_stack,
                         bracket_count_is_lexical: Default::default(),
                         bracket_count: Default::default(),
@@ -794,7 +841,7 @@ impl<'trie> Matcher<'trie> {
                         {
                             let m = PartialMatch {
                                 start_position: current.start_position,
-                                trie_position: *v,
+                                trie_position: v.transition,
                                 capture_stack: current.capture_stack.clone(),
                                 bracket_count: Default::default(),
                                 bracket_count_is_lexical: Default::default(),
@@ -818,13 +865,25 @@ impl<'trie> Matcher<'trie> {
                     Some(v) => {
                         let m = PartialMatch {
                             start_position: current.start_position,
-                            trie_position: *v,
+                            trie_position: v.transition,
                             bracket_count: Default::default(),
                             bracket_count_is_lexical: Default::default(),
                             capture_stack: current.capture_stack.clone(), // rc
                         };
                         handle_maybe_full_match(trie, &m, &input, out);
                         handle_partial_match(next_matches, max_concurrent_matches, m);
+
+                        for v in v.loops.iter() {
+                            let m = PartialMatch {
+                                start_position: current.start_position,
+                                trie_position: *v,
+                                bracket_count: Default::default(),
+                                bracket_count_is_lexical: Default::default(),
+                                capture_stack: current.capture_stack.clone(), // rc
+                            };
+                            // handle_maybe_full_match(trie, &m, &input, out); // full match can't happen from ..+
+                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                        }
                     }
                     None => {}
                 }

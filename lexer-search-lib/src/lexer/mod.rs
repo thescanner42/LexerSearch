@@ -110,12 +110,14 @@ pub enum MaybeSliceRef<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EllipsisEnum {
-    // ...
+    /// ...
     Normal,
-    // ..> corner bracket ellipsis operator
+    /// ..> corner bracket ellipsis operator
     CBE,
-    // ..} scope blocking ellipsis operator
+    /// ..} scope blocking ellipsis operator
     SBE,
+    /// ..+
+    Jump,
 }
 
 /// reference to token emitted by lexer
@@ -138,11 +140,7 @@ pub enum LexerTokenVariant<'a> {
     ///  - lexical level change matches change in indentation level, comparing
     ///    against previous indentation levels
     LexicalLevelChange(i32, MaybeSliceRef<'a>),
-    /// ... or ..>
-    ///
     /// only emitted when the lexer is set to process a pattern
-    /// 
-    /// true indicates cbee
     Ellipsis(EllipsisEnum),
     /// $VAR, #VAR or &VAR
     ///

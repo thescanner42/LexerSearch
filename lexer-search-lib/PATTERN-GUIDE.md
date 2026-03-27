@@ -132,6 +132,23 @@ let x = 123; // yes!
 test(x);
 ```
 
+## Repetitions
+
+Only the simplest form of looping is provided via the `..+` operator. For
+example:
+
+```
+#[test]
+..+ #[...] ..+
+fn &_(...) {...}
+```
+
+The section surround by `..+` is matched one or more times. The first instance
+of `..+` marks the destination node. The second instance marks the source
+transition. When the source transition is reached, execution is forked with one
+partial match continuing with the remaining parts of the pattern, and the other
+jumping back to the destination node. 
+
 # Languages
 
 This field indicates what languages the patterns should apply to. For the
