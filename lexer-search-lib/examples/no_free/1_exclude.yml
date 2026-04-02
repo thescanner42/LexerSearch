@@ -1,0 +1,12 @@
+patterns:
+- |-
+  &_SAME_V = malloc(...);
+  ..}
+  free(&_SAME_V);
+name: exclude
+group: malloc_no_free
+languages:
+  - c
+out:
+  ignore: 'true'
+transform: {}

@@ -1,0 +1,9 @@
+# example purposes - not comprehensive
+patterns:
+- |-
+  &_SAME_V = malloc(...);
+name: ''
+group: malloc_no_free
+languages:
+  - c
+transform: {}

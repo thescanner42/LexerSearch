@@ -1,3 +1,4 @@
+# example purposes - not comprehensive
 patterns: # "anchor" pattern. smallest span
   - >
     &_VAR = KeyPairGenerator.getInstance($ALG ...)

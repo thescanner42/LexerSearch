@@ -519,20 +519,32 @@ impl Trie {
 }
 
 #[derive(Clone, Default)]
+pub struct PartialMatchBracketState {
+    /// depth: enforce too-long and too-short rules. bracket level while
+    /// traversing (...)
+    depth: u32,
+    /// indicates currently inside ..} and non zero bracket count
+    ///
+    /// allows for lexical scope bypass in too-long and too-short rules
+    sbe_storage: u32,
+}
+
+impl PartialMatchBracketState {
+    pub fn pass_through_sbe_info(&self) -> Self {
+        Self {
+            depth: 0,
+            sbe_storage: self.sbe_storage,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct PartialMatch {
     /// byte offset in input
     pub start_position: Position,
     pub trie_position: usize,
 
-    /// indicates that bracket_count:
-    ///  - is being used in an ellipsis not within bracket
-    ///  - non pythonic language and lexical scope change
-    ///
-    /// allows for lexical scope bypass in too-long and too-short rules
-    pub bracket_count_is_lexical: bool,
-
-    /// enforce too-long and too-short rules
-    pub bracket_count: usize,
+    pub bracket_state: PartialMatchBracketState,
 
     // rc since it's likely to be passed unchanged between transitions
     //
@@ -813,8 +825,6 @@ impl<'trie> Matcher<'trie> {
                             for (k, v) in full_match.out.iter() {
                                 map.insert(k.clone(), v.clone());
                             }
-                            // lastly, remove any suppressed vars
-                            map.retain(|k, _| !k.starts_with(&[b'_']));
                             map
                         },
                     });
@@ -836,13 +846,11 @@ impl<'trie> Matcher<'trie> {
                     let mut new_stack = (*current.capture_stack).clone();
                     new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
                     let new_stack = Arc::new(new_stack);
-
                     let m = PartialMatch {
                         start_position: current.start_position,
                         trie_position: v.transition,
                         capture_stack: new_stack,
-                        bracket_count_is_lexical: Default::default(),
-                        bracket_count: Default::default(),
+                        bracket_state: current.bracket_state.pass_through_sbe_info(),
                     };
 
                     handle_maybe_full_match(trie, &m, input, out);
@@ -860,8 +868,7 @@ impl<'trie> Matcher<'trie> {
                                 start_position: current.start_position,
                                 trie_position: v.transition,
                                 capture_stack: current.capture_stack.clone(),
-                                bracket_count: Default::default(),
-                                bracket_count_is_lexical: Default::default(),
+                                bracket_state: current.bracket_state.pass_through_sbe_info(),
                             };
 
                             handle_maybe_full_match(trie, &m, input, out);
@@ -871,7 +878,7 @@ impl<'trie> Matcher<'trie> {
                 }
             }
 
-            if current.bracket_count != 0 && !current.bracket_count_is_lexical {
+            if current.bracket_state.depth != 0 {
                 // blocked by NOT TOO SHORT rule
             } else {
                 // attempt literal transition
@@ -883,9 +890,8 @@ impl<'trie> Matcher<'trie> {
                         let m = PartialMatch {
                             start_position: current.start_position,
                             trie_position: v.transition,
-                            bracket_count: Default::default(),
-                            bracket_count_is_lexical: Default::default(),
                             capture_stack: current.capture_stack.clone(), // rc
+                            bracket_state: current.bracket_state.pass_through_sbe_info(),
                         };
                         handle_maybe_full_match(trie, &m, &input, out);
                         handle_partial_match(next_matches, max_concurrent_matches, m);
@@ -898,8 +904,7 @@ impl<'trie> Matcher<'trie> {
                             let m = PartialMatch {
                                 start_position: current.start_position,
                                 trie_position: v.transition,
-                                bracket_count: Default::default(),
-                                bracket_count_is_lexical: Default::default(),
+                                bracket_state: current.bracket_state.pass_through_sbe_info(),
                                 capture_stack: Arc::new(new_capture_stack),
                             };
                             // handle_maybe_full_match(trie, &m, &input, out); // full match can't happen from ..+
@@ -953,33 +958,26 @@ impl<'trie> Matcher<'trie> {
                 }
             }
 
+            let mut next = current;
+
             // handle maybe reflexive transition
-            let (maybe_bracket, sbe) = match trie.nodes[current.trie_position].reflexive {
-                ReflexiveTransition::NormalEllipsis => (None, false),
-                ReflexiveTransition::ContainedEllipsis(bracket_type) => (Some(bracket_type), false),
-                ReflexiveTransition::SBE => (None, true),
+            let maybe_bracket = match trie.nodes[next.trie_position].reflexive {
+                ReflexiveTransition::ContainedEllipsis(bracket_type) => Some(bracket_type),
+                ReflexiveTransition::SBE => Some(BracketType::Curly),
+                ReflexiveTransition::NormalEllipsis => {
+                    // not influence by too long or too short rule
+                    next.bracket_state = Default::default(); // clear sbe state
+                    handle_partial_match(next_matches, max_concurrent_matches, next);
+                    return;
+                }
                 _ => return, // no reflexive here
             };
 
-            let mut next = current;
-            // check for NOT TOO LONG rule
-            let mut continuation_valid = true;
+            let mut continuation_valid = true; // check for NOT TOO LONG rule
             match input.variant {
                 TokenVariant::Byte(b) => {
                     let vals = match maybe_bracket {
-                        None => {
-                            if !sbe {
-                                None
-                            } else {
-                                // make not-too-long rule apply for curly
-                                // brackets
-                                match b {
-                                    b'{' => Some(1),
-                                    b'}' => Some(-1),
-                                    _ => None,
-                                }
-                            }
-                        }
+                        None => None,
                         Some(bracket) => match bracket {
                             BracketType::Round => match b {
                                 b'(' => Some(1),
@@ -1005,20 +1003,28 @@ impl<'trie> Matcher<'trie> {
                     };
 
                     if let Some(delta) = vals {
-                        match next.bracket_count.checked_add_signed(delta) {
-                            Some(v) => {
-                                if sbe {
-                                    if v == 0 {
-                                        next.bracket_count_is_lexical = false;
-                                    } else if b == b'{' {
-                                        next.bracket_count_is_lexical = true;
-                                    }
+                        match trie.nodes[next.trie_position].reflexive {
+                            ReflexiveTransition::ContainedEllipsis(_) => {
+                                match next.bracket_state.depth.checked_add_signed(delta) {
+                                    Some(v) => {
+                                        next.bracket_state.depth = v;
+                                    },
+                                    None => {
+                                        continuation_valid = false;
+                                    },
                                 }
-                                next.bracket_count = v;
-                            }
-                            None => {
-                                continuation_valid = false;
-                            }
+                            },
+                            ReflexiveTransition::SBE => {
+                                match next.bracket_state.sbe_storage.checked_add_signed(delta) {
+                                    Some(v) => {
+                                        next.bracket_state.sbe_storage = v;
+                                    },
+                                    None => {
+                                        continuation_valid = false;
+                                    },
+                                }
+                            },
+                            _ => unreachable!(),
                         }
                     }
                 }
@@ -1228,6 +1234,64 @@ mod tests {
                     line: 1,
                 },
                 name: "basic_literal_test_py".to_string(),
+                group: "".to_string(),
+                captures: Default::default(),
+            }],
+        );
+    }
+
+    #[test]
+    fn sbe_flow_state() {
+        run_matcher_test(
+            Language::CLike,
+            &[("sbe_flow_state", b"a ..} b ..} c")],
+            b"a { b } c",
+            vec![FullMatch {
+                start: Position {
+                    offset: 0,
+                    column: 1,
+                    line: 1,
+                },
+                end: Position {
+                    offset: 9,
+                    column: 10,
+                    line: 1,
+                },
+                name: "sbe_flow_state".to_string(),
+                group: "".to_string(),
+                captures: Default::default(),
+            }],
+        );
+    }
+
+    #[test]
+    fn sbe_flow_state_break() {
+        run_matcher_test(
+            Language::CLike,
+            &[("sbe_flow_state_break", b"a ..} b ... c ..} d")],
+            b"a {{ b } c } d",
+            vec![],
+        );
+    }
+
+    #[test]
+    fn sbe_no_break() {
+        run_matcher_test(
+            Language::CLike,
+            &[("sbe_no_break", b"a ..} b(...) ..} c")],
+            b"a { b(test) } c",
+            vec![FullMatch {
+                start: Position {
+                    offset: 0,
+                    column: 1,
+                    line: 1,
+                },
+                end: Position {
+                    offset: 15,
+                    column: 16,
+                    line: 1,
+                },
+                name: "sbe_no_break".to_string(),
                 group: "".to_string(),
                 captures: Default::default(),
             }],

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, ffi::OsStr, path::Path};
 
-use crate::lexer::Position;
+use crate::{engine::matcher::FullMatch, lexer::Position};
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
@@ -254,4 +254,19 @@ impl<'a> serde::Serialize for FullMatchOut<'a> {
 
         s.end()
     }
+}
+
+pub fn final_postprocess(mut m: FullMatch) -> Option<FullMatch> {
+    match m.captures.get(b"ignore".as_slice()) {
+        Some(v) => {
+            if v.as_ref() == b"true".as_slice() {
+                return None;
+            }
+        }
+        None => {}
+    }
+
+    // lastly, remove any suppressed vars
+    m.captures.retain(|k, _| !k.starts_with(&[b'_']));
+    Some(m)
 }

@@ -1,6 +1,5 @@
 fn main() {
     assert_eq!(1, 1); // assert out of test
-    assert_eq!(1, 1); // assert out of test
 }
 
 #[cfg(test)]
