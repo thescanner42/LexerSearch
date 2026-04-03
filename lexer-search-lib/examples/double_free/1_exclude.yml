@@ -1,0 +1,26 @@
+patterns:
+- |-
+  free(&_SAME_V);
+  ..}
+  &_SAME_V = NULL;
+  ..}
+  free(&_SAME_V);
+- |-
+  free(&_SAME_V);
+  ..}
+  &_SAME_V = 0;
+  ..}
+  free(&_SAME_V);
+- |-
+  free(&_SAME_V);
+  ..}
+  &_SAME_V = malloc(...);
+  ..}
+  free(&_SAME_V);
+name: exclude
+group: double_free
+languages:
+  - c
+out:
+  ignore: 'true'
+transform: {}

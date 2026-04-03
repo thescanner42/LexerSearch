@@ -18,5 +18,5 @@ patterns: # key size from anchor
 languages:
   - java
 group: java_key
-# no name - each match creates a new finding
-# name: test
+# each match creates different finding
+name: unique_keysize

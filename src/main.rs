@@ -12,7 +12,7 @@ use lexer_search_lib::{
         matcher::{FullMatch, Matcher},
         matchers::{Tries, make_c_like_lexer, make_python_like_lexer, make_rust_like_lexer},
     },
-    io::{FullMatchOut, Language},
+    io::{FullMatchOut, Language, final_postprocess},
     lexer::DEFAULT_MAX_TOKEN_LENGTH,
 };
 
@@ -67,15 +67,10 @@ fn main() -> Result<(), String> {
         if entry.file_type().is_file() {
             let path = entry.path();
             let write_out_finding = |m: FullMatch| {
-                match m.captures.get(b"ignore".as_slice()) {
-                    Some(v) => {
-                        if v.as_ref() == b"true".as_slice() {
-                            return;
-                        }
-                    },
-                    None => {},
-                }
-
+                let m = match final_postprocess(m) {
+                    Some(v) => v,
+                    None => return,
+                };
                 println!(
                     "{}",
                     serde_json::to_string(&FullMatchOut {

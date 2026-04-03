@@ -4,8 +4,8 @@ Patterns are contained in yaml files. The top level keys are:
 
 - [patterns](#patterns)
 - [languages](#languages)
-- [transform](#transform) (optional)
-- [out](#out) (optional)
+- [transform](#transform)
+- [out](#out)
 - [name](#name)
 - [group](#group)
 
@@ -29,9 +29,6 @@ let x = 0;
 something(x); // DIFFERENT
 something(0); // DIFFERENT
 ```
-
-Other than matching token literals, the pattern syntax also provide
-[captures](#captures) and the [ellipsis operators](#ellipsis-operators).
 
 ## Captures
 
@@ -131,6 +128,24 @@ let x = 123; // yes!
 }
 test(x);
 ```
+
+The scope blocking ellipsis stores the change in depth from the previous scope
+blocking ellipsis. In this example, both b and c have to be in scope of a:
+
+```
+a ..} b ..} c
+```
+
+```rust
+a
+{ // +1 depth. stored for next ..}
+  b
+} // -1 depth. sum of zero; ..} allows it
+c
+```
+
+However this flow of information is blocked by ellipsis not contained in
+brackets, e.g. `a ..} b ... c ..} d`.
 
 ## Repetitions
 
@@ -308,6 +323,7 @@ patterns: # key size from anchor
 languages:
   - java
 group: java_key
+name: unique_key_size
 ```
 ```yaml
 patterns: # alg name from anchor
@@ -334,16 +350,21 @@ The above rules together produce a single match:
 }
 ```
 
-Matches merge when the groups are equal, and between the match and the
-intersection of the matches already in the finding group, the span of one must
-cover the other.
+The matches are merged into the same finding when:
+- the user stated group is the same
+- between the incoming match and the intersection of the matches already in the
+  finding, the span of one must cover the other
 
-When a match merges into a finding group, the captures are merged together in
-the output and the span is the union of all the matches.
+This on its own is not enough to prevent merging of unrelated matches, as there
+could be overlapping matches with patterns of unrelated variables. If the name
+of a capture starts with "SAME" or "_SAME" then the capture name and value must
+match in the finding for them to be merged.
 
-If a match with the same name has already been added to a group, the latter
-match evicts the previous match. However, if the name is empty or unstated, this
-instead duplicates the group and only evicts for one of them.
+By default, if a match being merged has the same name as an existing match, then
+the new match replaces the old match, and the old match is discarded. This
+better models cases like variable redeclaration / shadowing. However, if the
+rule starts with "unique", then this instead forks the finding - both are sent
+to the output.
 
 # Examples
 

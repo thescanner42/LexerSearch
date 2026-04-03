@@ -96,42 +96,47 @@ impl Group {
         let m_start = m.start.offset;
         let m_end = m.end.offset;
 
-        // one needs to completely cover the other
         let m_covers_self = m_start <= self_start && m_end >= self_end;
-
-        // true if self completely covers m
         let self_covers_m = self_start <= m_start && self_end >= m_end;
-
-        // one must completely cover the other
         if !(m_covers_self || self_covers_m) {
             return EvictedMatch::NotAccepted(m);
         }
 
+        for (k, in_v) in m.captures.iter() {
+            if k.strip_prefix(b"_")
+                .unwrap_or(k)
+                .starts_with(b"SAME".as_slice())
+            {
+                for i in 0..self.data_len {
+                    // both declare a same variable then those variables
+                    // must match - otherwise these are unrelated
+                    if let Some(current_v) = self.data[i].captures.get(k) {
+                        if in_v != current_v {
+                            return EvictedMatch::NotAccepted(m);
+                        }
+                    }
+                }
+            }
+        }
+
         for i in 0..self.data_len {
-            if self.data[i].name.is_empty() && m.name.is_empty() {
-                if self.data[i].start.offset == m.start.offset
-                    && self.data[i].end.offset == m.end.offset
+            if self.data[i].name == m.name {
+                let mut m_clone = m.clone();
+                if self.data[i].start.offset == m_clone.start.offset
+                    && self.data[i].end.offset == m_clone.end.offset
                 {
-                    // don't evict if this match is just an inferior but equivalent
-                    // form of the existing match
+                    self.data[i].captures.append(&mut m_clone.captures);
                     return EvictedMatch::Accepted(m);
                 }
-                // similar to other branch but should instead duplicate the data
-                // then replace
-                let mut me_dup = self.clone();
-                std::mem::swap(&mut m, &mut me_dup.data[i]);
-                me_dup.recalculate_intersection();
-                let _ = m; // discard overridden match
-                return EvictedMatch::GroupDup(me_dup);
-            } else if self.data[i].name == m.name {
-                let m_clone = m.clone();
-                if self.data[i].start.offset == m.start.offset
-                    && self.data[i].end.offset == m.end.offset
-                {
-                    // don't evict if this match is just an inferior but equivalent
-                    // form of the existing match
-                    return EvictedMatch::Accepted(m_clone);
+
+                if m_clone.name.starts_with("unique") {
+                    let mut me_dup = self.clone();
+                    std::mem::swap(&mut m, &mut me_dup.data[i]);
+                    me_dup.recalculate_intersection();
+                    let _ = m; // discard overridden match
+                    return EvictedMatch::GroupDup(me_dup);
                 }
+
                 // the upstream findings are returned in order of end position
                 // then start position. it makes sense to replace where variable
                 // redeclaration occurs (use the last instance).
