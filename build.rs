@@ -1,8 +1,39 @@
-use std::{fs::OpenOptions, num::NonZeroUsize, path::PathBuf};
+use std::{fs::OpenOptions, num::NonZeroUsize, path::PathBuf, process::Command};
 
+use chrono::{TimeZone, Utc};
 use lexer_search_lib::engine::matchers::Tries;
 
 fn main() -> Result<(), String> {
+    let cargo_version = env!("CARGO_PKG_VERSION");
+
+    let git_hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let git_ts = Command::new("git")
+        .args(["show", "-s", "--format=%ct", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+
+    let git_date = git_ts
+        .parse::<i64>()
+        .ok()
+        .map(|ts| {
+            Utc.timestamp_opt(ts, 0)
+                .single()
+                .unwrap()
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let combined_version = cargo_version.to_owned() + " " + &git_hash + " " + &git_date;
+
+    println!("cargo:rustc-env=BUILD_VERSION={}", combined_version);
+
     if std::env::var_os("CARGO_FEATURE_EMBED_PATTERNS").is_none() {
         return Ok(()); // only if feature
     }

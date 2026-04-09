@@ -3,9 +3,12 @@ use std::{
     io::BufReader,
     num::{NonZero, NonZeroUsize},
     path::PathBuf,
+    sync::Arc,
+    thread,
 };
 
 use clap::Parser;
+use crossbeam::channel::bounded;
 
 use lexer_search_lib::{
     engine::{
@@ -19,6 +22,7 @@ use lexer_search_lib::{
 #[derive(Parser, Debug)]
 #[command(name = "lexer-search")]
 #[command(about = "Source code scanner")]
+#[command(version = env!("BUILD_VERSION"))]
 pub struct Args {
     #[cfg(not(feature = "embed-patterns"))]
     pub patterns_path: PathBuf,
@@ -43,52 +47,50 @@ const EMBEDDED_PATTERNS: &'static [u8] = include_bytes!("../target/lexer-search-
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
-    #[allow(unused)]
-    let mut tries = Tries::default();
+    // Load rules
+    let tries = {
+        #[cfg(not(feature = "embed-patterns"))]
+        {
+            Tries::construct_tries(&args.patterns_path, args.max_token_length)?
+        }
 
-    // load rules from cli
-    #[cfg(not(feature = "embed-patterns"))]
-    {
-        tries = Tries::construct_tries(&args.patterns_path, args.max_token_length)?;
-    }
+        #[cfg(feature = "embed-patterns")]
+        {
+            let res =
+                bincode::serde::decode_from_slice(EMBEDDED_PATTERNS, bincode::config::standard())
+                    .expect("failed to load embedded patterns");
+            res.0
+        }
+    };
+    let tries = Arc::new(tries);
 
-    // load rules from embedded patterns
-    #[cfg(feature = "embed-patterns")]
-    {
-        let res = bincode::serde::decode_from_slice(EMBEDDED_PATTERNS, bincode::config::standard())
-            .expect("failed to load embedded patterns");
-        tries = res.0;
-    }
+    let (tx, rx) = bounded::<PathBuf>(512);
+    let scan_path = args.scan_path.clone();
+    let producer = thread::spawn(move || {
+        for entry in walkdir::WalkDir::new(scan_path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            if tx.send(entry.path().to_path_buf()).is_err() {
+                break;
+            }
+        }
+    });
 
-    for entry in walkdir::WalkDir::new(&args.scan_path)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if entry.file_type().is_file() {
-            let path = entry.path();
-            let write_out_finding = |m: FullMatch| {
-                let m = match final_postprocess(m) {
-                    Some(v) => v,
-                    None => return,
-                };
-                println!(
-                    "{}",
-                    serde_json::to_string(&FullMatchOut {
-                        file: path.strip_prefix(&args.scan_path).unwrap(),
-                        start: m.start,
-                        end: m.end,
-                        name: m.name,
-                        group: m.group,
-                        captures: &m.captures
-                    })
-                    .unwrap()
-                );
-            };
-
-            if let Some(ext) = path.extension() {
-                match Language::from_file_extension(ext) {
-                    Some(lang) => {
-                        let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut handles = Vec::new();
+    for _ in 0..num_cpus::get() {
+        let rx = rx.clone();
+        let tries = Arc::clone(&tries);
+        let scan_path = args.scan_path.clone();
+        let handle = thread::spawn(move || {
+            while let Ok(path) = rx.recv() {
+                if let Some(ext) = path.extension() {
+                    if let Some(lang) = Language::from_file_extension(ext) {
+                        let file = match File::open(&path) {
+                            Ok(f) => f,
+                            Err(_) => continue,
+                        };
                         let mut r = BufReader::new(file);
                         let trie = tries.trie_for_lang(lang);
                         let mut matcher = Matcher::new(
@@ -97,7 +99,22 @@ fn main() -> Result<(), String> {
                             args.max_token_length,
                             args.group_cap,
                         );
-                        match lang {
+
+                        let write_out_finding = |m: FullMatch| {
+                            if let Some(m) = final_postprocess(m) {
+                                let out = FullMatchOut {
+                                    file: path.strip_prefix(&scan_path).unwrap(),
+                                    start: m.start,
+                                    end: m.end,
+                                    name: m.name,
+                                    group: m.group,
+                                    captures: &m.captures,
+                                };
+                                println!("{}", serde_json::to_string(&out).unwrap());
+                            }
+                        };
+
+                        let _ = match lang {
                             Language::C | Language::Cpp | Language::CSharp | Language::Java => {
                                 matcher.process_and_drain(
                                     &mut r,
@@ -122,12 +139,19 @@ fn main() -> Result<(), String> {
                                 make_rust_like_lexer(false, args.max_token_length),
                                 write_out_finding,
                             ),
-                        }?;
+                        };
                     }
-                    None => {}
                 }
             }
-        }
+        });
+
+        handles.push(handle);
+    }
+
+    producer.join().unwrap(); // wait for producer to finish
+
+    for h in handles {
+        h.join().unwrap();
     }
 
     Ok(())

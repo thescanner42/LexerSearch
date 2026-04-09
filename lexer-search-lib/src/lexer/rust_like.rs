@@ -365,6 +365,9 @@ impl super::Lexer for Lexer {
                     LexerEnum::LongCommentAfterAsterisk => {
                         if byte == b'/' {
                             self.state = LexerEnum::Start;
+                        } else if byte == b'*' {
+                            // stay in LongCommentAfterAsterisk if another '*' is seen
+                            self.state = LexerEnum::LongCommentAfterAsterisk;
                         } else {
                             self.state = LexerEnum::LongComment;
                         }

@@ -104,16 +104,9 @@ example rule `test(...)`:
 
 #### Scope Blocking
 
-As mentioned above, the "not too long" rule applies inside brackets. However,
-there is a useful extra place to make this rule apply:
-
-- ellipsis not declared in brackets
-- lexical bracket reached
-  - curly `{}`
-  - non python-like language scopes
-
 The scope blocking ellipsis ensures that variable declaration aren't accessible
-in the parent lexical scope:
+in the parent lexical scope. It allows the "not too long" rule to apply to
+lexical curly brackets:
 
 ```
 let &VAR = #NUM;
@@ -130,7 +123,7 @@ test(x);
 ```
 
 The scope blocking ellipsis stores the change in depth from the previous scope
-blocking ellipsis. In this example, both b and c have to be in scope of a:
+blocking ellipsis. In this example, both `b` and `c` have to be in scope of `a`:
 
 ```
 a ..} b ..} c
@@ -166,6 +159,16 @@ jumping back to the destination node.
 
 If a repitition section contains the creation of captures then the last time the
 section is matched will be used to populate those captures.
+
+## Embed Patterns
+
+LexerSearch has a feature flag to embed your scan patterns into the output binary.
+By default this is disabled and the patterns are passed via cli.
+
+```bash
+$ cargo run -- <PATTERNS_PATH> <SCAN_PATH> # DEFAULT
+$ LEXERSEARCH_EMBED_PATTERNS=<PATTERNS_PATH> cargo run --features=embed-patterns -- <SCAN_PATH>
+```
 
 # Languages
 
