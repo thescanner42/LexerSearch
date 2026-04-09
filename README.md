@@ -2,13 +2,15 @@
 
 [![License: APACHE/MIT](https://img.shields.io/badge/License-APACHE/MIT-yellow.svg)](https://opensource.org/licenses/APACHE)
 
-LexerSearch is a static analysis tool for detecting unsecure code.
+LexerSearch is a static analysis tool for detecting issues in source code.
 
-| Feature | Description |
+|  |  |
 |---------|-------------|
 | **SAFE** | LexerSearch can handle **any input**. It operates with **bounded memory** regardless of the source code size and will **never error** during scanning. |
 | **FAST** | Scanning occurs in **linear time** and is typically over **50× faster** than existing tools like Semgrep. |
 | **CLEAR** | Pattern matching is **explainable**. Transparent logic explains exactly **why a match occurs**.  |
+
+_________
 
 Check out the resources:
 
