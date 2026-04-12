@@ -158,11 +158,10 @@ struct PatternInfo {
     group: String,
 }
 
-#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-enum ReflexiveTransition {
-    /// lack of a transition
-    #[default]
-    None,
+/// indicates the type of reflexive transition (one that leads back to the same
+/// node). e.g. caused by ...
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReflexiveTransition {
     /// ellipsis operator not contained in any brackets
     NormalEllipsis,
     /// ellipsis operator contained in specified type of brackets
@@ -184,6 +183,9 @@ struct TransitionTo {
     /// from ..+
     ///
     /// generally empty vector
+    ///
+    /// TODO in TrieNode.next, the loops are only used by the matcher if the key
+    /// is a literal transition. perhaps this representation can be improved
     loops: Vec<LoopTransition>,
 }
 
@@ -193,7 +195,7 @@ struct TrieNode {
     full_match: Vec<PatternInfo>,
     next: HashMap<Transition, TransitionTo>,
     /// reflexive transition
-    reflexive: ReflexiveTransition,
+    reflexive: Vec<ReflexiveTransition>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -318,16 +320,9 @@ impl Trie {
                 }
             };
 
-            #[derive(Debug, PartialEq, Eq)]
-            enum ReflexiveTransitionEnum {
-                None,
-                Some(BracketType),
-                SBE,
-            }
-
             enum PatternProduct {
                 Transition(Transition),
-                ReflexiveTransition(ReflexiveTransitionEnum),
+                ReflexiveTransition(ReflexiveTransition),
                 Jump,
             }
 
@@ -373,15 +368,17 @@ impl Trie {
                 TokenVariant::Ellipsis(ellipsis_type) => match ellipsis_type {
                     EllipsisEnum::Normal => match bracket_stack.last() {
                         Some(bracket_type) => PatternProduct::ReflexiveTransition(
-                            ReflexiveTransitionEnum::Some(*bracket_type),
+                            ReflexiveTransition::ContainedEllipsis(*bracket_type),
                         ),
-                        None => PatternProduct::ReflexiveTransition(ReflexiveTransitionEnum::None),
+                        None => {
+                            PatternProduct::ReflexiveTransition(ReflexiveTransition::NormalEllipsis)
+                        }
                     },
                     EllipsisEnum::CBE => PatternProduct::ReflexiveTransition(
-                        ReflexiveTransitionEnum::Some(BracketType::Corner),
+                        ReflexiveTransition::ContainedEllipsis(BracketType::Corner),
                     ),
                     EllipsisEnum::SBE => {
-                        PatternProduct::ReflexiveTransition(ReflexiveTransitionEnum::SBE)
+                        PatternProduct::ReflexiveTransition(ReflexiveTransition::SBE)
                     }
                     EllipsisEnum::Jump => PatternProduct::Jump,
                 },
@@ -423,10 +420,7 @@ impl Trie {
                             });
                         }
                         Some(v) => {
-                            // map - it's possible that there was no previous
-                            // transition. in which case the repitition
-                            // shouldn't do anything
-                            previous_transition.as_ref().map(|loop_pos| {
+                            if let Some(loop_pos) = &previous_transition {
                                 trie.nodes[loop_pos.0]
                                     .next
                                     .get_mut(&loop_pos.1)
@@ -436,9 +430,13 @@ impl Trie {
                                         transition: v.trie_position,
                                         capture_pop_count: v.new_captures_since_start,
                                     });
-                            });
+                            } else {
+                                // e.g. ..+ ..+
+                                return Err("..+ loop lacks a source or destination".to_string());
+                            }
                         }
                     }
+                    previous_transition = None;
                 }
                 PatternProduct::Transition(transition) => {
                     previous_transition = Some((trie_position, transition.clone()));
@@ -459,58 +457,20 @@ impl Trie {
                     }
                 }
                 PatternProduct::ReflexiveTransition(reflexive_transition) => {
-                    let other_reflexive = trie.nodes[trie_position].reflexive;
-                    let ok = match other_reflexive {
-                        ReflexiveTransition::None => {
-                            trie.nodes[trie_position].reflexive = match reflexive_transition {
-                                ReflexiveTransitionEnum::None => {
-                                    ReflexiveTransition::NormalEllipsis
-                                }
-                                ReflexiveTransitionEnum::Some(bracket_type) => {
-                                    ReflexiveTransition::ContainedEllipsis(bracket_type)
-                                }
-                                ReflexiveTransitionEnum::SBE => ReflexiveTransition::SBE,
-                            };
-                            true
+                    previous_transition = None;
+                    let mut already_exists = false;
+                    for r in trie.nodes[trie_position].reflexive.iter() {
+                        // there is a small number of variants, vec always small
+                        if *r == reflexive_transition {
+                            already_exists = true;
+                            break;
                         }
-                        ReflexiveTransition::NormalEllipsis => {
-                            reflexive_transition == ReflexiveTransitionEnum::None
-                        }
-                        ReflexiveTransition::ContainedEllipsis(bracket_type) => {
-                            reflexive_transition == ReflexiveTransitionEnum::Some(bracket_type)
-                        }
-                        ReflexiveTransition::SBE => {
-                            reflexive_transition == ReflexiveTransitionEnum::SBE
-                        }
-                    };
+                    }
 
-                    if !ok {
-                        // this is a limitation to the pattern matching engine -
-                        // only one type of reflexive transition is allowed per
-                        // node.
-                        //
-                        // for example if there are two patterns:
-                        // - vector<...> abc;
-                        // - vector<..>> abc;
-                        //
-                        // they have the same set of tokens reaching a node, and
-                        // then they are requesting a different type of
-                        // reflexive transition on that same node
-                        //
-                        // in this and a vast majority of cases, one of the two
-                        // patterns was written incorrectly. for this example
-                        // the first one is wrong
-                        //
-                        // but there could be cases where both are valid:
-                        // - < ... > meaning match any less than greater span
-                        // - < ..> > meaning match any template arg list
-                        //
-                        // that case seems very weird to me and unlikely to pop
-                        // up in practice. but if it does, then the trie node
-                        // struct can be changed to accomodate
-                        return Err(
-                            "only one type of reflexive transition is allowed per node".to_string()
-                        );
+                    if !already_exists {
+                        trie.nodes[trie_position]
+                            .reflexive
+                            .push(reflexive_transition);
                     }
                 }
             }
@@ -518,7 +478,7 @@ impl Trie {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct PartialMatchBracketState {
     /// depth: enforce too-long and too-short rules. bracket level while
     /// traversing (...)
@@ -538,7 +498,7 @@ impl PartialMatchBracketState {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct PartialMatch {
     /// byte offset in input
     pub start_position: Position,
@@ -550,6 +510,12 @@ pub struct PartialMatch {
     //
     // Arc so Matcher can be sent between threads
     pub capture_stack: Arc<Vec<Arc<Box<[u8]>>>>,
+
+    /// suppose there are two different reflexive transitions at the same node.
+    /// if one has been followed, then only that same type of reflexive
+    /// transition can be followed while remainins in that same node. this
+    /// prevents an explosion in the number of partial matches
+    pub reflexive_transition: Option<ReflexiveTransition>,
 }
 
 impl PartialMatch {
@@ -739,7 +705,7 @@ impl<'trie> Matcher<'trie> {
 
         fn explore_transitions(
             current: PartialMatch,
-            input: Token,
+            input: &Token,
             trie: &Trie,
             next_matches: &mut BinaryHeap<PartialMatch>,
             max_concurrent_matches: usize,
@@ -843,6 +809,7 @@ impl<'trie> Matcher<'trie> {
             ) {
                 // capture transition
                 if let Some(v) = trie.nodes[current.trie_position].next.get(&capture_unit) {
+                    // ok - typically a small number of captures
                     let mut new_stack = (*current.capture_stack).clone();
                     new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
                     let new_stack = Arc::new(new_stack);
@@ -850,6 +817,7 @@ impl<'trie> Matcher<'trie> {
                         start_position: current.start_position,
                         trie_position: v.transition,
                         capture_stack: new_stack,
+                        reflexive_transition: None,
                         bracket_state: current.bracket_state.pass_through_sbe_info(),
                     };
 
@@ -868,6 +836,7 @@ impl<'trie> Matcher<'trie> {
                                 start_position: current.start_position,
                                 trie_position: v.transition,
                                 capture_stack: current.capture_stack.clone(),
+                                reflexive_transition: None,
                                 bracket_state: current.bracket_state.pass_through_sbe_info(),
                             };
 
@@ -891,6 +860,7 @@ impl<'trie> Matcher<'trie> {
                             start_position: current.start_position,
                             trie_position: v.transition,
                             capture_stack: current.capture_stack.clone(), // rc
+                            reflexive_transition: None,
                             bracket_state: current.bracket_state.pass_through_sbe_info(),
                         };
                         handle_maybe_full_match(trie, &m, &input, out);
@@ -905,6 +875,7 @@ impl<'trie> Matcher<'trie> {
                                 start_position: current.start_position,
                                 trie_position: v.transition,
                                 bracket_state: current.bracket_state.pass_through_sbe_info(),
+                                reflexive_transition: None,
                                 capture_stack: Arc::new(new_capture_stack),
                             };
                             // handle_maybe_full_match(trie, &m, &input, out); // full match can't happen from ..+
@@ -958,91 +929,128 @@ impl<'trie> Matcher<'trie> {
                 }
             }
 
-            let mut next = current;
-
             // handle maybe reflexive transition
-            let maybe_bracket = match trie.nodes[next.trie_position].reflexive {
-                ReflexiveTransition::ContainedEllipsis(bracket_type) => Some(bracket_type),
-                ReflexiveTransition::SBE => Some(BracketType::Curly),
-                ReflexiveTransition::NormalEllipsis => {
-                    // not influence by too long or too short rule
-                    next.bracket_state = Default::default(); // clear sbe state
-                    handle_partial_match(next_matches, max_concurrent_matches, next);
-                    return;
-                }
-                _ => return, // no reflexive here
-            };
 
-            let mut continuation_valid = true; // check for NOT TOO LONG rule
-            match input.variant {
-                TokenVariant::Byte(b) => {
-                    let vals = match maybe_bracket {
-                        None => None,
-                        Some(bracket) => match bracket {
-                            BracketType::Round => match b {
-                                b'(' => Some(1),
-                                b')' => Some(-1),
-                                _ => None,
-                            },
-                            BracketType::Square => match b {
-                                b'[' => Some(1),
-                                b']' => Some(-1),
-                                _ => None,
-                            },
-                            BracketType::Corner => match b {
-                                b'<' => Some(1),
-                                b'>' => Some(-1),
-                                _ => None,
-                            },
-                            BracketType::Curly => match b {
-                                b'{' => Some(1),
-                                b'}' => Some(-1),
-                                _ => None,
-                            },
-                        },
-                    };
+            fn handle_reflexive_transition(
+                mut next: PartialMatch,
+                input: &Token,
+                r: ReflexiveTransition,
+                next_matches: &mut BinaryHeap<PartialMatch>,
+                max_concurrent_matches: usize,
+            ) {
+                next.reflexive_transition = Some(r);
+                let maybe_bracket = match r {
+                    ReflexiveTransition::ContainedEllipsis(bracket_type) => Some(bracket_type),
+                    ReflexiveTransition::SBE => Some(BracketType::Curly),
+                    ReflexiveTransition::NormalEllipsis => {
+                        // not influence by too long or too short rule
+                        next.bracket_state = Default::default(); // clear sbe state
+                        handle_partial_match(next_matches, max_concurrent_matches, next);
+                        return;
+                    }
+                };
 
-                    if let Some(delta) = vals {
-                        match trie.nodes[next.trie_position].reflexive {
-                            ReflexiveTransition::ContainedEllipsis(_) => {
-                                match next.bracket_state.depth.checked_add_signed(delta) {
-                                    Some(v) => {
-                                        next.bracket_state.depth = v;
-                                    },
-                                    None => {
-                                        continuation_valid = false;
-                                    },
-                                }
+                let mut continuation_valid = true; // check for NOT TOO LONG rule
+                match input.variant {
+                    TokenVariant::Byte(b) => {
+                        let vals = match maybe_bracket {
+                            None => None,
+                            Some(bracket) => match bracket {
+                                BracketType::Round => match b {
+                                    b'(' => Some(1),
+                                    b')' => Some(-1),
+                                    _ => None,
+                                },
+                                BracketType::Square => match b {
+                                    b'[' => Some(1),
+                                    b']' => Some(-1),
+                                    _ => None,
+                                },
+                                BracketType::Corner => match b {
+                                    b'<' => Some(1),
+                                    b'>' => Some(-1),
+                                    _ => None,
+                                },
+                                BracketType::Curly => match b {
+                                    b'{' => Some(1),
+                                    b'}' => Some(-1),
+                                    _ => None,
+                                },
                             },
-                            ReflexiveTransition::SBE => {
-                                match next.bracket_state.sbe_storage.checked_add_signed(delta) {
-                                    Some(v) => {
-                                        next.bracket_state.sbe_storage = v;
-                                    },
-                                    None => {
-                                        continuation_valid = false;
-                                    },
+                        };
+
+                        if let Some(delta) = vals {
+                            match r {
+                                ReflexiveTransition::ContainedEllipsis(_) => {
+                                    match next.bracket_state.depth.checked_add_signed(delta) {
+                                        Some(v) => {
+                                            next.bracket_state.depth = v;
+                                        }
+                                        None => {
+                                            continuation_valid = false;
+                                        }
+                                    }
                                 }
-                            },
-                            _ => unreachable!(),
+                                ReflexiveTransition::SBE => {
+                                    match next.bracket_state.sbe_storage.checked_add_signed(delta) {
+                                        Some(v) => {
+                                            next.bracket_state.sbe_storage = v;
+                                        }
+                                        None => {
+                                            continuation_valid = false;
+                                        }
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
+
+                if continuation_valid {
+                    handle_partial_match(next_matches, max_concurrent_matches, next);
+                } else {
+                    // too long rule failed. the ... operator is not allowed to
+                    // expand into the parent bracket scope
+                }
             }
 
-            if continuation_valid {
-                handle_partial_match(next_matches, max_concurrent_matches, next);
-            } else {
-                // too long rule failed. the ... operator is not allowed to
-                // expand into the parent bracket scope
+            match current.reflexive_transition {
+                // this partial match state already followed a reflexive
+                // transition and so it is compelled to only follow that type of
+                // reflexive transition even if others exist in this node while
+                // it remains at this node - other partial matches would have
+                // been created to follow those other paths
+                Some(r) => {
+                    handle_reflexive_transition(
+                        current,
+                        &input,
+                        r,
+                        next_matches,
+                        max_concurrent_matches,
+                    );
+                }
+                // this partial match state is newly entering into a reflexive
+                // transition
+                None => {
+                    for &r in trie.nodes[current.trie_position].reflexive.iter() {
+                        handle_reflexive_transition(
+                            current.clone(),
+                            &input,
+                            r,
+                            next_matches,
+                            max_concurrent_matches,
+                        );
+                    }
+                }
             }
         }
 
         for m in std::mem::take(&mut self.matches).into_iter() {
             explore_transitions(
                 m,
-                token.clone(),
+                &token,
                 &self.trie,
                 &mut next_matches,
                 self.max_concurrent_matches,
@@ -1052,7 +1060,7 @@ impl<'trie> Matcher<'trie> {
 
         explore_transitions(
             PartialMatch::new(token.start),
-            token,
+            &token,
             &self.trie,
             &mut next_matches,
             self.max_concurrent_matches,
