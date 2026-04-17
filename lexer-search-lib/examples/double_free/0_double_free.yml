@@ -5,6 +5,7 @@ patterns:
   ..}
   free(&_SAME_V);
   ..}
+  ..^
   free(&_SAME_V);
 name: ''
 group: double_free

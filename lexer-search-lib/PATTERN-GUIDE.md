@@ -160,6 +160,29 @@ jumping back to the destination node.
 If a repitition section contains the creation of captures then the last time the
 section is matched will be used to populate those captures.
 
+## Set Start
+
+The `..^` operator overwrites the start of the match's span. For example
+pattern:
+
+```
+import abc
+... ..^ abc.something(...)
+```
+
+```py
+import abc
+# match span starts at 'abc' and not the 'import' above
+abc.something(123)
+```
+
+Since LexerSearch operates in bounded memory there is a configurable number of
+simultaneous overlapping matches which are followed. Priority is given to
+partial matches which start at a later position in the code. `..^` influences
+the starting position of a partial match; it increases its priority and causes
+other partial matches to be dropped first. `..^` applies to the next
+non-reflexive transition in the pattern (e.g. `abc`).
+
 ## Embed Patterns
 
 LexerSearch has a feature flag to embed your scan patterns into the output binary.
@@ -169,6 +192,56 @@ By default this is disabled and the patterns are passed via cli.
 $ cargo run -- <PATTERNS_PATH> <SCAN_PATH> # DEFAULT
 $ LEXERSEARCH_EMBED_PATTERNS=<PATTERNS_PATH> cargo run --features=embed-patterns -- <SCAN_PATH>
 ```
+
+## Pattern Conflict
+
+The LexerSearch matcher aims to be as simple and fast as possible while still
+being featureful. This led to a design decision where partial matches do not
+store traversal information. This means that some patterns when combined
+together could give ambiguity as to which pattern was matched.
+
+Cases where this ambiguity could arise give an error on load. Detection occurs
+when patterns arrive at the same node (via a shared pattern prefix) and then at
+the same node they would complete an operation which could lose information on
+which pattern to choose when a full match occurs.
+
+LexerSearch is designed under the assumption that these ambiguous cases only
+occur when one of the patterns is incorrect. There is typically only one correct
+way of creating a pattern which matches code.
+
+### Ellipsis Operators
+
+Pattern `vector< ..> >` searches for a vector declared with a template argument
+list. `vector< ... >` searches for "vector" literal, less than, some tokens,
+then greater than. Both patterns can't be used together since this gives
+ambiguity on which reflexive transition a partial match followed. In this case,
+only the former is likely correct. But if you truly need to, then as a
+workaround "vector" can be replaced with a capture paired with the transform
+checking for equality with "vector".
+
+### Repitition
+
+When a partial match follows a repitition back to a previous node, since it does
+not store traversal information, it could still match with a pattern that did
+not have the repitition. For example these two patterns can't be combined: `123
+a 456`,  `123 ..+ a ..+ 456`
+
+```mermaid
+flowchart LR
+    A([Start]) -- "123" --> B([ ])
+    B -- "a" --> C([" "])
+    B -- "a" --> BB([" "])
+    BB -- "ε" --> B
+    C -- "456" --> D([End])
+```
+
+Since `123 a a a 456` would incorrectly match both.
+
+### Set Start
+
+These two patterns can't be combined: `abc ..^ 123`, `abc 123` since this would
+require the partial match to store information related to if its start position
+was overriden or not, then only be accepted by the appropriate pattern.
 
 # Languages
 

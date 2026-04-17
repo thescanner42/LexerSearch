@@ -118,6 +118,8 @@ pub enum EllipsisEnum {
     SBE,
     /// ..+
     Jump,
+    /// ..^
+    SetStart,
 }
 
 /// reference to token emitted by lexer
