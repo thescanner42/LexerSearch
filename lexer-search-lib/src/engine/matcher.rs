@@ -412,6 +412,7 @@ impl Trie {
             };
 
             if requires_close_repitition_next {
+                requires_close_repitition_next = false;
                 if matches!(product, PatternProduct::Jump) && trie_jump_position.is_some() {
                     // ok - properly closed
                 } else {
@@ -1732,5 +1733,9 @@ int x = 100;
 
         assert!(test_pattern_combination("vec< ... >", "vec< ..> >").is_err());
         assert!(test_pattern_combination("vec< ..> >", "vec< ... >").is_err());
+
+        assert!(test_pattern_combination("123 ..+ a ..+ 456", "123 ..+ a ..+ 456").is_ok());
+        assert!(test_pattern_combination("123 ..^ 456", "123 ..^ 456").is_ok());
+        assert!(test_pattern_combination("vec< ... >", "vec< ... >").is_ok());
     }
 }
