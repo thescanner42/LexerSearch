@@ -116,7 +116,7 @@ pub enum EllipsisEnum {
     CBE,
     /// ..} scope blocking ellipsis operator
     SBE,
-    /// ..+
+    /// ..*
     Jump,
     /// ..^
     SetStart,

@@ -419,13 +419,13 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' || byte == b'>' || byte == b'}' || byte == b'+'  || byte == b'^' {
+                        if byte == b'.' || byte == b'>' || byte == b'}' || byte == b'*'  || byte == b'^' {
                             self.state = LexerEnum::Start;
                             let t = match byte {
                                 b'.' => EllipsisEnum::Normal,
                                 b'>' => EllipsisEnum::CBE,
                                 b'}' => EllipsisEnum::SBE,
-                                b'+' => EllipsisEnum::Jump,
+                                b'*' => EllipsisEnum::Jump,
                                 b'^' => EllipsisEnum::SetStart,
                                 _ => unreachable!(),
                             };

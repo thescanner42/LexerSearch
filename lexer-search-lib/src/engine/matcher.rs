@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     num::NonZero,
     sync::Arc,
     usize,
@@ -177,12 +177,16 @@ pub struct JumpInfo {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct TransitionTo {
+pub enum TransitionToEnum {
     /// dst trie node
-    transition: usize,
+    NormalTransition(usize),
+    /// repitition return info
+    Jump(JumpInfo),
+}
 
-    loops: Option<JumpInfo>,
-
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct TransitionTo {
+    transition: TransitionToEnum,
     /// from ..^
     set_start: bool,
 }
@@ -198,6 +202,12 @@ struct TrieNode {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Trie {
     nodes: Vec<TrieNode>,
+
+    // TODO refactor to builder pattern - this field is not required when
+    // running
+    #[serde(skip_serializing)]
+    #[serde(skip_deserializing)]
+    repitition_nodes: HashSet<usize>,
 }
 
 impl Default for Trie {
@@ -206,6 +216,7 @@ impl Default for Trie {
             // default has index 0 valid but doesn't lead anywhere. required since
             // index 0 is the start index and assumed to be ok
             nodes: vec![Default::default()],
+            repitition_nodes: Default::default()
         }
     }
 }
@@ -235,7 +246,7 @@ impl Trie {
         // always points to a valid index (trie has min len of 1)
         let mut trie_position: usize = 0;
 
-        // None if not currently inside ..+, Some otherwise
+        // None if not currently inside ..*, Some otherwise
         let mut trie_jump_position: Option<JumpInfo> = None;
         // the previous TransitionTo that was followed. helpful for overall
         // construction, when something needs to apply to the previous thing.
@@ -245,10 +256,12 @@ impl Trie {
         // implement ..^ applies to next non reflexived transition
         let mut set_start: bool = false;
 
-        // add a check for ..+
+        // add a check for ..*
         let mut node_is_new: bool = false;
-        // add a check for ..+
+        // add a check for ..*
         let mut requires_close_repitition_next = false;
+        // add a check for ..*
+        let mut repitition_no_nodes_are_new = true;
 
         let mut captures: HashMap<Box<[u8]>, usize> = Default::default();
         let mut capture_count_increment = 0;
@@ -402,8 +415,10 @@ impl Trie {
                                 b'$' => Transition::CaptureString,
                                 _ => unreachable!(),
                             };
-                            captures.insert(items.into(), capture_count_increment);
-                            capture_count_increment += 1;
+                            if trie_jump_position.is_none() {
+                                captures.insert(items.into(), capture_count_increment);
+                                capture_count_increment += 1;
+                            }
                             ret
                         }
                     })
@@ -430,49 +445,58 @@ impl Trie {
                     match trie_jump_position.take() {
                         None => {
                             // mark the current position for later reference
-                            // (e.g. the token before the first ..+)
+                            // (e.g. the token before the first ..*)
                             trie_jump_position = Some(JumpInfo {
                                 return_trie_position: trie_position,
                                 new_captures_since_loop_entry: 0,
                             });
+                            repitition_no_nodes_are_new = true;
                         }
                         Some(v) => {
                             // set the previous transition (before the second
-                            // ..+) loop to the position marked by the first ..+
+                            // ..*) loop to the position marked by the first ..*
                             if let Some(previous_transition) = &previous_transition {
+                                if !trie.repitition_nodes.insert(v.return_trie_position) {
+                                    if repitition_no_nodes_are_new {
+                                        // ok - same path as was followed before
+                                    } else {
+                                        // a new repitition that led to the same
+                                        // node as a different repitition but
+                                        // used a different path to get there
+                                        return Err("pattern conflict: different repititions arrived at same position".to_string());
+                                    }
+                                }
+
+                                if node_is_new {
+                                    // typical flow creates a node and then a
+                                    // transition to it. from repitition, this
+                                    // fixes it up - no need to create node
+                                    // since we are going to an existing one
+                                    trie.nodes.pop();
+                                }
+                                trie_position = v.return_trie_position;
                                 let previous_transition = trie.nodes[previous_transition.0]
                                     .next
                                     .get_mut(&previous_transition.1)
                                     .unwrap(); // safe since it was added previously
 
-                                match &previous_transition.loops {
-                                    Some(loops) => {
-                                        if loops.return_trie_position == v.return_trie_position {
-                                            // ok: same loop e.g.
-                                            // ..+ a ..+ 123
-                                            // ..+ a ..+ 456
-                                        } else {
-                                            // not ok. same source but different destination e.g.
-                                            // 123 a a ..+ a ..+ 456
-                                            // 123 a ..+ a a ..+ 456
-                                            return Err("pattern conflict: repitition has different destinations".to_string());
-                                        }
-                                    }
-                                    None => {
+                                match &previous_transition.transition {
+                                    TransitionToEnum::NormalTransition(_) => {
                                         if node_is_new {
                                             // ok: the last transition was newly
                                             // layed down by this same pattern
-                                        } else if previous_transition.loops.is_none() {
+                                        } else {
                                             // 123 a 456
-                                            // 123 ..+ a ..+ 456
+                                            // 123 ..* a ..* 456
                                             return Err("pattern conflict: repitition must match, does not already exist".to_string());
                                         }
-                                        previous_transition.loops = Some(v);
+                                        previous_transition.transition = TransitionToEnum::Jump(v);
                                     }
+                                    _ => {}
                                 }
                             } else {
-                                // e.g. ..+ ..+
-                                return Err("..+ loop lacks a source or destination".to_string());
+                                // e.g. ..* ..*
+                                return Err("..* loop lacks a source or destination".to_string());
                             }
                         }
                     }
@@ -485,7 +509,10 @@ impl Trie {
                     match trie.nodes[trie_position].next.entry(transition) {
                         std::collections::hash_map::Entry::Occupied(occupied_entry) => {
                             node_is_new = false;
-                            trie_position = occupied_entry.get().transition;
+                            trie_position = match &occupied_entry.get().transition {
+                                TransitionToEnum::NormalTransition(v) => *v,
+                                TransitionToEnum::Jump(jump_info) => jump_info.return_trie_position,
+                            };
                             if occupied_entry.get().set_start != set_start {
                                 if set_start {
                                     return Err("pattern conflict: set start must match, does not already exist".to_string());
@@ -496,7 +523,8 @@ impl Trie {
                                     );
                                 }
                             }
-                            if occupied_entry.get().loops.is_some() {
+                            if matches!(occupied_entry.get().transition, TransitionToEnum::Jump(_))
+                            {
                                 // a loop is seen at this transition so it is
                                 // expected that this pattern also closes the
                                 // loop at this same position (next token)
@@ -505,10 +533,10 @@ impl Trie {
                         }
                         std::collections::hash_map::Entry::Vacant(vacant_entry) => {
                             node_is_new = true;
+                            repitition_no_nodes_are_new = false;
                             vacant_entry.insert(TransitionTo {
                                 // create transition
-                                transition: len,
-                                loops: Default::default(),
+                                transition: TransitionToEnum::NormalTransition(len),
                                 set_start,
                             });
                             trie_position = len;
@@ -521,8 +549,10 @@ impl Trie {
                     match trie.nodes[trie_position].reflexive {
                         Some(v) => {
                             if v != reflexive_transition {
-                                return Err("pattern conflict: only one reflexive transition allowed"
-                                    .to_string());
+                                return Err(
+                                    "pattern conflict: only one reflexive transition allowed"
+                                        .to_string(),
+                                );
                             }
                         }
                         None => {
@@ -629,14 +659,15 @@ impl<'trie> Matcher<'trie> {
         trie: &'trie Trie,
         max_concurrent_matches: usize,
         max_token_length: NonZero<usize>,
-        max_group_memory: NonZero<usize>,
+        max_concurrent_groups: NonZero<usize>,
+        max_group_size: NonZero<usize>,
     ) -> Self {
         Self {
             trie: trie,
             matches: Default::default(),
             max_concurrent_matches,
             canonicalizer: Canonicalizer::new(max_token_length),
-            grouper: Grouper::new(max_group_memory),
+            grouper: Grouper::new(max_concurrent_groups, max_group_size),
         }
     }
 
@@ -862,19 +893,38 @@ impl<'trie> Matcher<'trie> {
                     let mut new_stack = (*current.capture_stack).clone();
                     new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
                     let new_stack = Arc::new(new_stack);
-
-                    let m = PartialMatch {
-                        start_position: if v.set_start {
-                            input.start
-                        } else {
-                            current.start_position
-                        },
-                        trie_position: v.transition,
-                        capture_stack: new_stack, // rc
-                        bracket_state: current.bracket_state.pass_through_sbe_info(),
+                    let new_start_position = if v.set_start {
+                        input.start
+                    } else {
+                        current.start_position
                     };
-                    handle_maybe_full_match(trie, &m, &input, out);
-                    handle_partial_match(next_matches, max_concurrent_matches, m);
+                    let bracket_state = current.bracket_state.pass_through_sbe_info();
+                    match &v.transition {
+                        TransitionToEnum::NormalTransition(v) => {
+                            let m = PartialMatch {
+                                start_position: new_start_position,
+                                trie_position: *v,
+                                capture_stack: new_stack, // rc
+                                bracket_state,
+                            };
+                            handle_maybe_full_match(trie, &m, &input, out);
+                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                        }
+                        TransitionToEnum::Jump(jump_info) => {
+                            let mut new_capture_stack: Vec<Arc<Box<[u8]>>> = (*new_stack).clone();
+                            new_capture_stack.truncate(
+                                new_capture_stack.len() - jump_info.new_captures_since_loop_entry,
+                            );
+                            let m = PartialMatch {
+                                start_position: new_start_position,
+                                trie_position: jump_info.return_trie_position,
+                                capture_stack: Arc::new(new_capture_stack), // rc
+                                bracket_state,
+                            };
+                            // handle_maybe_full_match(trie, &m, &input, out); // not possible
+                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                        }
+                    }
                 }
 
                 // backref transitions
@@ -884,18 +934,46 @@ impl<'trie> Matcher<'trie> {
                             .next
                             .get(&Transition::Backref(i))
                         {
-                            let m = PartialMatch {
-                                start_position: if v.set_start {
-                                    input.start
-                                } else {
-                                    current.start_position
-                                },
-                                trie_position: v.transition,
-                                capture_stack: current.capture_stack.clone(),
-                                bracket_state: current.bracket_state.pass_through_sbe_info(),
-                            };
-                            handle_maybe_full_match(trie, &m, &input, out);
-                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                            match &v.transition {
+                                TransitionToEnum::NormalTransition(pos) => {
+                                    let m = PartialMatch {
+                                        start_position: if v.set_start {
+                                            input.start
+                                        } else {
+                                            current.start_position
+                                        },
+                                        trie_position: *pos,
+                                        capture_stack: current.capture_stack.clone(),
+                                        bracket_state: current
+                                            .bracket_state
+                                            .pass_through_sbe_info(),
+                                    };
+                                    handle_maybe_full_match(trie, &m, &input, out);
+                                    handle_partial_match(next_matches, max_concurrent_matches, m);
+                                }
+                                TransitionToEnum::Jump(jump_info) => {
+                                    let mut new_capture_stack: Vec<Arc<Box<[u8]>>> =
+                                        (*current.capture_stack).clone();
+                                    new_capture_stack.truncate(
+                                        new_capture_stack.len()
+                                            - jump_info.new_captures_since_loop_entry,
+                                    );
+                                    let m = PartialMatch {
+                                        start_position: if v.set_start {
+                                            input.start
+                                        } else {
+                                            current.start_position
+                                        },
+                                        trie_position: jump_info.return_trie_position,
+                                        capture_stack: Arc::new(new_capture_stack),
+                                        bracket_state: current
+                                            .bracket_state
+                                            .pass_through_sbe_info(),
+                                    };
+                                    // handle_maybe_full_match(trie, &m, &input, out); // not possible
+                                    handle_partial_match(next_matches, max_concurrent_matches, m);
+                                }
+                            }
                         }
                     }
                 }
@@ -910,37 +988,41 @@ impl<'trie> Matcher<'trie> {
                     .get(&Transition::Literal(input.variant.clone()))
                 {
                     Some(v) => {
-                        let m = PartialMatch {
-                            start_position: if v.set_start {
-                                input.start
-                            } else {
-                                current.start_position
-                            },
-                            trie_position: v.transition,
-                            capture_stack: current.capture_stack.clone(), // rc
-                            bracket_state: current.bracket_state.pass_through_sbe_info(),
-                        };
-                        handle_maybe_full_match(trie, &m, &input, out);
-                        handle_partial_match(next_matches, max_concurrent_matches, m);
-
-                        if let Some(loops) = &v.loops {
-                            let mut new_capture_stack: Vec<Arc<Box<[u8]>>> =
-                                (*current.capture_stack).clone();
-                            new_capture_stack.truncate(
-                                new_capture_stack.len() - loops.new_captures_since_loop_entry,
-                            );
-                            let m = PartialMatch {
-                                start_position: if v.set_start {
-                                    input.start
-                                } else {
-                                    current.start_position
-                                },
-                                trie_position: loops.return_trie_position,
-                                bracket_state: current.bracket_state.pass_through_sbe_info(),
-                                capture_stack: Arc::new(new_capture_stack),
-                            };
-                            // handle_maybe_full_match(trie, &m, &input, out); // not possible
-                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                        match &v.transition {
+                            TransitionToEnum::NormalTransition(pos) => {
+                                let m = PartialMatch {
+                                    start_position: if v.set_start {
+                                        input.start
+                                    } else {
+                                        current.start_position
+                                    },
+                                    trie_position: *pos,
+                                    capture_stack: current.capture_stack.clone(), // rc
+                                    bracket_state: current.bracket_state.pass_through_sbe_info(),
+                                };
+                                handle_maybe_full_match(trie, &m, &input, out);
+                                handle_partial_match(next_matches, max_concurrent_matches, m);
+                            }
+                            TransitionToEnum::Jump(jump_info) => {
+                                let mut new_capture_stack: Vec<Arc<Box<[u8]>>> =
+                                    (*current.capture_stack).clone();
+                                new_capture_stack.truncate(
+                                    new_capture_stack.len()
+                                        - jump_info.new_captures_since_loop_entry,
+                                );
+                                let m = PartialMatch {
+                                    start_position: if v.set_start {
+                                        input.start
+                                    } else {
+                                        current.start_position
+                                    },
+                                    trie_position: jump_info.return_trie_position,
+                                    capture_stack: Arc::new(new_capture_stack),
+                                    bracket_state: current.bracket_state.pass_through_sbe_info(),
+                                };
+                                // handle_maybe_full_match(trie, &m, &input, out); // not possible
+                                handle_partial_match(next_matches, max_concurrent_matches, m);
+                            }
                         }
                     }
                     None => {}
@@ -1162,7 +1244,7 @@ mod tests {
             }
         };
         let mut out: Vec<FullMatch> = Vec::new();
-        let mut matcher = Matcher::new(&trie, 100, enum_lexer_token_size, 1.try_into().unwrap());
+        let mut matcher = Matcher::new(&trie, 100, enum_lexer_token_size, 1.try_into().unwrap(), 1.try_into().unwrap());
         matcher
             .process_and_drain(&mut cursor, subject_lexer, |m| {
                 out.push(m);
@@ -1697,6 +1779,65 @@ int x = 100;
         );
     }
 
+    #[test]
+    fn qualify_name() {
+        run_matcher_test(
+            Language::CLike,
+            &[("qualify_name", br#"&NAME = &ABC ..* . &DEF ..* + &PARAM;"#)],
+            br#"out = a.b.c.d + v;"#,
+            vec![FullMatch {
+                start: Position {
+                    offset: 0,
+                    column: 1,
+                    line: 1,
+                },
+                end: Position {
+                    offset: 18,
+                    column: 19,
+                    line: 1,
+                },
+                name: "qualify_name".to_string(),
+                group: "".to_string(),
+                captures: BTreeMap::from([
+                    (Box::from(b"NAME" as &[u8]), Box::from(b"out" as &[u8])),
+                    (Box::from(b"ABC" as &[u8]), Box::from(b"a" as &[u8])),
+                    (Box::from(b"PARAM" as &[u8]), Box::from(b"v" as &[u8])),
+                ]),
+            }],
+        );
+    }
+
+    #[test]
+    fn qualify_name_backref() {
+        run_matcher_test(
+            Language::CLike,
+            &[(
+                "qualify_name_backref",
+                br#"&NAME = &ABC ..* . &NAME ..* + &PARAM;"#,
+            )],
+            br#"out = a.out.out.out + v;"#,
+            vec![FullMatch {
+                start: Position {
+                    offset: 0,
+                    column: 1,
+                    line: 1,
+                },
+                end: Position {
+                    offset: 24,
+                    column: 25,
+                    line: 1,
+                },
+                name: "qualify_name_backref".to_string(),
+                group: "".to_string(),
+                captures: BTreeMap::from([
+                    (Box::from(b"NAME" as &[u8]), Box::from(b"out" as &[u8])),
+                    (Box::from(b"ABC" as &[u8]), Box::from(b"a" as &[u8])),
+                    (Box::from(b"PARAM" as &[u8]), Box::from(b"v" as &[u8])),
+                ]),
+            }],
+        );
+    }
+
     fn test_pattern_combination(in_one: &'static str, in_two: &'static str) -> Result<(), String> {
         let mut trie = Trie::default();
         trie.add_pattern(
@@ -1726,15 +1867,23 @@ int x = 100;
         assert!(test_pattern_combination("123 ..^ 456", "123 456").is_err());
         assert!(test_pattern_combination("123 456", "123 ..^ 456").is_err());
 
-        assert!(test_pattern_combination("123 ..+ a ..+ 456", "123 a 456").is_err());
-        assert!(test_pattern_combination("123 a 456", "123 ..+ a ..+ 456").is_err());
+        assert!(test_pattern_combination("a", "..* a ..*").is_err());
+        assert!(test_pattern_combination("..* a ..*", "..* b ..*").is_err());
+        assert!(test_pattern_combination("123 ..* a ..* 456", "123 a 456").is_err());
+        assert!(test_pattern_combination("123 ..* a ..* 456", "123 a a 456").is_err());
+        assert!(test_pattern_combination("123 a 456", "123 ..* a ..* 456").is_err());
 
-        assert!(test_pattern_combination("123 ..+ a ..+ 456", "..+ 123 a ..+ 456").is_err());
+        assert!(test_pattern_combination("123 456", "123 ..* a ..* 456").is_ok());
 
         assert!(test_pattern_combination("vec< ... >", "vec< ..> >").is_err());
         assert!(test_pattern_combination("vec< ..> >", "vec< ... >").is_err());
 
-        assert!(test_pattern_combination("123 ..+ a ..+ 456", "123 ..+ a ..+ 456").is_ok());
+        assert!(test_pattern_combination("123 ..* a ..* 456", "123 ..* b ..* 456").is_err());
+        assert!(test_pattern_combination("123 ..* a a a ..* 456", "123 ..* a a b ..* 456").is_err());
+        assert!(test_pattern_combination("123 ..* a a ..* 456", "123 ..* a ..* 456").is_err());
+        assert!(test_pattern_combination("123 ..* a a ..* 456", "123 ..* ..* 456").is_err());
+
+        assert!(test_pattern_combination("123 ..* a ..* 456", "123 ..* a ..* 456").is_ok());
         assert!(test_pattern_combination("123 ..^ 456", "123 ..^ 456").is_ok());
         assert!(test_pattern_combination("vec< ... >", "vec< ... >").is_ok());
     }

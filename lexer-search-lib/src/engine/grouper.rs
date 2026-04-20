@@ -182,17 +182,28 @@ impl Group {
     }
 }
 
-#[derive(Default)]
 pub struct Grouper {
     data_len: usize,
     data: Box<[Group]>,
+    max_group_size: NonZero<usize>,
+}
+
+impl Default for Grouper {
+    fn default() -> Self {
+        Self {
+            data_len: Default::default(),
+            data: Default::default(),
+            max_group_size: 1.try_into().unwrap(),
+        }
+    }
 }
 
 impl Grouper {
-    pub fn new(cap: NonZero<usize>) -> Self {
+    pub fn new(max_concurrent_groups: NonZero<usize>, max_group_size: NonZero<usize>) -> Self {
         Self {
-            data: vec![Default::default(); cap.get()].into_boxed_slice(),
+            data: vec![Default::default(); max_concurrent_groups.get()].into_boxed_slice(),
             data_len: 0,
+            max_group_size,
         }
     }
 
@@ -237,7 +248,7 @@ impl Grouper {
 
         if !accepted {
             // the full match could not be added to any group. create a new one
-            let new_group = Group::new(self.data.len().try_into().unwrap(), group_name, m);
+            let new_group = Group::new(self.max_group_size, group_name, m);
             self.insert_group(new_group, out);
         }
     }
@@ -329,7 +340,7 @@ mod tests {
 
     #[test]
     fn grouper_passes_through_ungrouped_matches() {
-        let mut grouper = Grouper::new(NonZero::new(2).unwrap());
+        let mut grouper = Grouper::new(NonZero::new(2).unwrap(), NonZero::new(2).unwrap());
 
         let mut out = Vec::new();
         grouper.process(fm("x", "", 0, 5, &[]), |m| out.push(m));
@@ -340,7 +351,7 @@ mod tests {
 
     #[test]
     fn grouper_groups_and_drains() {
-        let mut grouper = Grouper::new(NonZero::new(2).unwrap());
+        let mut grouper = Grouper::new(NonZero::new(2).unwrap(), NonZero::new(2).unwrap());
         let mut out = Vec::new();
 
         grouper.process(
@@ -367,7 +378,7 @@ mod tests {
 
     #[test]
     fn grouper_evicts_earliest_intersection_on_overflow() {
-        let mut grouper = Grouper::new(NonZero::new(1).unwrap());
+        let mut grouper = Grouper::new(NonZero::new(1).unwrap(), NonZero::new(1).unwrap());
         let mut out = Vec::new();
 
         grouper.process(fm("a", "g1", 0, 10, &[]), |_| {});

@@ -142,23 +142,17 @@ brackets, e.g. `a ..} b ... c ..} d`.
 
 ## Repetitions
 
-Only the simplest form of looping is provided via the `..+` operator. For
-example:
+Looping is provided via the `..*` operator. For example:
 
 ```
 #[test]
-..+ #[...] ..+
+..* #[...] ..*
 fn &NAME(...) {...}
 ```
 
-The section surround by `..+` is matched one or more times. The first instance
-of `..+` marks the destination node. The second instance marks the source
-transition. When the source transition is reached, execution is forked with one
-partial match continuing with the remaining parts of the pattern, and the other
-jumping back to the destination node. 
-
-If a repitition section contains the creation of captures then the last time the
-section is matched will be used to populate those captures.
+The section surround by `..*` is matched zero or more times. If a repitition
+section contains the creation of captures then those captures are forgotten
+outside of the section.
 
 ## Set Start
 
@@ -219,29 +213,21 @@ only the former is likely correct. But if you truly need to, then as a
 workaround "vector" can be replaced with a capture paired with the transform
 checking for equality with "vector".
 
-### Repitition
-
-When a partial match follows a repitition back to a previous node, since it does
-not store traversal information, it could still match with a pattern that did
-not have the repitition. For example these two patterns can't be combined: `123
-a 456`,  `123 ..+ a ..+ 456`
-
-```mermaid
-flowchart LR
-    A([Start]) -- "123" --> B([ ])
-    B -- "a" --> C([" "])
-    B -- "a" --> BB([" "])
-    BB -- "ε" --> B
-    C -- "456" --> D([End])
-```
-
-Since `123 a a a 456` would incorrectly match both.
-
 ### Set Start
 
 These two patterns can't be combined: `abc ..^ 123`, `abc 123` since this would
 require the partial match to store information related to if its start position
-was overriden or not, then only be accepted by the appropriate pattern.
+was overriden or not, then only be accepted by the appropriate pattern. Patterns
+should instead follow a common flow and set the start in a consistent place.
+
+### Repitition
+
+When a partial match follows a repitition back to a previous node, since it does
+not store traversal information, it could still match with a pattern that did
+not have the repitition or had a different repitition. For example these two
+patterns can't be combined: `..* a ..*` and `..* b ..*`; on accepting `a` or
+`b`, the partial match arrives back at the start node, losing information on
+which repitition was followed - both patterns could still match.
 
 # Languages
 
