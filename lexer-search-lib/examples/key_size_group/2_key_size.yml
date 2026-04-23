@@ -2,15 +2,15 @@ patterns: # key size from anchor
   - >
     &_VAR = KeyPairGenerator.getInstance(...)
     ..}
-    &_VAR.initialize(#KEY_SIZE)
+    &_VAR.initialize(&KEY_SIZE)
   - >
     &_VAR = KeyPairGenerator.getInstance(...)
     ..}
-    &_V2 = #KEY_SIZE;
+    &_V2 = &KEY_SIZE;
     ..}
     &_VAR.initialize(&_V2)
   - >
-    &_V2 = #KEY_SIZE;
+    &_V2 = &KEY_SIZE;
     ..}
     &_VAR = KeyPairGenerator.getInstance(...)
     ..}
@@ -20,3 +20,5 @@ languages:
 group: java_key
 # each match creates different finding
 name: unique_keysize
+transform:
+  KEY_SIZE: ^[0-9]

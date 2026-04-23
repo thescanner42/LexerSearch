@@ -1,6 +1,6 @@
 [package]
 name = "lexer-search-lib"
-version = "1.2.2"
+version = "2.2.2"
 edition = "2024"
 
 [dependencies]

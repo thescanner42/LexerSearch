@@ -35,8 +35,7 @@ something(0); // DIFFERENT
 Captures come in one of three forms, only matching a single lexer token and only
 the appropriate type of lexer token:
 
-- `#NUMBER_LITERAL`, matching `[0-9]+`
-- `&IDENTIFIER`,     e.g. `_my_variable_123`
+- `&IDENTIFIER`,     matching variables (e.g. `_my_variable_123`) or numbers (`[0-9]+`)
 - `$STRING_LITERAL`, e.g. `"hello world"`
 
 The first time a capture is stated in a pattern is the creation of the capture.
@@ -51,7 +50,7 @@ capture.
 > values.
 
 > [!IMPORTANT]  
-> Although `#ABC`, `&ABC`, and `$ABC`, are unrelated captures, only the
+> Although `&ABC`, and `$ABC`, are unrelated captures, only the
 > capture's name ("ABC") populates the output. In these clashing cases, the last
 > capture will be the one that appears in the output. Try to avoid this case.
 
@@ -109,7 +108,7 @@ in the parent lexical scope. It allows the "not too long" rule to apply to
 lexical curly brackets:
 
 ```
-let &VAR = #NUM;
+let &VAR = &NUM;
 ..}
 test(&VAR);
 ```
@@ -140,6 +139,20 @@ c
 However this flow of information is blocked by ellipsis not contained in
 brackets, e.g. `a ..} b ... c ..} d`.
 
+#### Statement Blocking
+
+This is intended for emulating the source-sink functionality seen in other SAST
+scanners. The following example detects when a variable is assigned to something
+which involves the number 5.
+
+```
+&NUM = ..? 5 ..? ;
+```
+
+The `..?` operator is very similar to the scope blocking ellipsis, but it will
+not exit the current statement. Its state is reset when reaching `...` or `..}`,
+(which are both intended to be used between statements).
+
 ## Repetitions
 
 Looping is provided via the `..*` operator. For example:
@@ -151,8 +164,10 @@ fn &NAME(...) {...}
 ```
 
 The section surround by `..*` is matched zero or more times. If a repitition
-section contains the creation of captures then those captures are forgotten
-outside of the section.
+section contains the creation of captures then those captures cannot be
+reference anywhere - they are forgotten when exiting the repitition section, and
+they cannot be backreferenced within the repitition section (it's instead
+treated as the creation of a different independent capture).
 
 ## Set Start
 
@@ -170,13 +185,6 @@ import abc
 abc.something(123)
 ```
 
-Since LexerSearch operates in bounded memory there is a configurable number of
-simultaneous overlapping matches which are followed. Priority is given to
-partial matches which start at a later position in the code. `..^` influences
-the starting position of a partial match; it increases its priority and causes
-other partial matches to be dropped first. `..^` applies to the next
-non-reflexive transition in the pattern (e.g. `abc`).
-
 ## Embed Patterns
 
 LexerSearch has a feature flag to embed your scan patterns into the output binary.
@@ -189,45 +197,101 @@ $ LEXERSEARCH_EMBED_PATTERNS=<PATTERNS_PATH> cargo run --features=embed-patterns
 
 ## Pattern Conflict
 
-The LexerSearch matcher aims to be as simple and fast as possible while still
-being featureful. This led to a design decision where partial matches do not
-store traversal information. This means that some patterns when combined
-together could give ambiguity as to which pattern was matched.
+When multiple LexerSearch patterns are run at the same time they can conflict
+with each other.
 
-Cases where this ambiguity could arise give an error on load. Detection occurs
-when patterns arrive at the same node (via a shared pattern prefix) and then at
-the same node they would complete an operation which could lose information on
-which pattern to choose when a full match occurs.
+LexerSearch is based off of a trie-like data structure. For example, the two patterns `a b` and `a c` are combined together like so:
 
-LexerSearch is designed under the assumption that these ambiguous cases only
-occur when one of the patterns is incorrect. There is typically only one correct
-way of creating a pattern which matches code.
+```mermaid
+%%{ init: { 'flowchart': {'defaultRenderer': 'elk' } } }%%
+flowchart LR
+    A([Start]) -- "a" --> B([ ])
+    B -- "b" --> C([" "])
+    B -- "c" --> D([" "])
+```
 
-### Ellipsis Operators
+Suppose a loop is introduced, `a ..+ a ..+ b` and `a c`. This constructs:
+
+```mermaid
+%%{ init: { 'flowchart': {'defaultRenderer': 'elk' } } }%%
+flowchart LR
+    A([Start]) -- "a" --> B([ ])
+    B -- "b" --> C([" "])
+    B -- "a" --> B
+    B -- "c" --> D([" "])
+```
+
+Since the structure is shared, input `a a c` can match despite not being
+match-able by each pattern individually.
+
+### Theory
+
+There are two ways of solving this problem. One way constructs the structure so
+that any loop forms its own branch - one follows the path that avoids the loop
+(uses it 0 times), and the other is formed when the loop is used (1 or more
+times). The above example would form:
+
+```mermaid
+%%{ init: { 'flowchart': {'defaultRenderer': 'elk' } } }%%
+flowchart LR
+    A([Start]) -- "a" --> B([ ])
+    B -- "c" --> C([" "])
+    B -- "b" --> D([" "])
+    B -- "a" --> E([" "])
+    E -- "a" --> E
+    E -- "b" --> F([" "])
+```
+
+The problem with this approach is that each loop in a pattern duplicates the
+number of branches needed to form the structure (2^n). This is untenable for
+longer patterns.
+
+The other solution uses the original structure but has each partial match store
+traversal information. When a loop is used, the partial match gets marked
+accordingly. At the possible full match, the partial match is only accepted if
+it used an appropriate traversal to get there. However this moves the problem to
+runtime, the number of partial matches would explode as the input is processed.
+
+Aside from managing pattern conflicts, detection is also not known to be possible in a reasonable time complexity while avoiding false positive and negatives.
+
+### Practice
+
+In practice, scanning source code is less ambiguous than these examples and
+there are ways of managing cases if they arise (which they should not).
+
+#### Repitition
+
+The repitition feature was created with a constrained use case in mind: function
+and method annotation in languages like java or rust. In these cases, there is
+always some preamble, and following that _very specific_ context, the repitition
+is used just to consume sections until the desired part is arrived at. Because
+repititions are used in specific context, there shouldn't ever be cases where
+they clash.
+
+```
+#[test] // annotation
+..* #[...] ..* // multiple times
+fn &_F(...) {...} // fn
+```
+
+#### Set Start
+
+Setting the start of a match via `..^` sets a flag on the transition in the
+structure. This is applied with a OR ASSIGN, so it could affect multiple
+patterns, e.g. `abc ..^ 123` and `abc 123`.
+
+The start should be set in a consistent way and it should happen at later parts
+of a pattern which are gated by sufficient context.
+
+#### Ellipsis Operators
 
 Pattern `vector< ..> >` searches for a vector declared with a template argument
 list. `vector< ... >` searches for "vector" literal, less than, some tokens,
 then greater than. Both patterns can't be used together since this gives
-ambiguity on which reflexive transition a partial match followed. In this case,
-only the former is likely correct. But if you truly need to, then as a
-workaround "vector" can be replaced with a capture paired with the transform
-checking for equality with "vector".
-
-### Set Start
-
-These two patterns can't be combined: `abc ..^ 123`, `abc 123` since this would
-require the partial match to store information related to if its start position
-was overriden or not, then only be accepted by the appropriate pattern. Patterns
-should instead follow a common flow and set the start in a consistent place.
-
-### Repitition
-
-When a partial match follows a repitition back to a previous node, since it does
-not store traversal information, it could still match with a pattern that did
-not have the repitition or had a different repitition. For example these two
-patterns can't be combined: `..* a ..*` and `..* b ..*`; on accepting `a` or
-`b`, the partial match arrives back at the start node, losing information on
-which repitition was followed - both patterns could still match.
+ambiguity on which reflexive transition a partial match followed, and because
+this ambiguity is arrived at by the same pattern prefix. For the ellipsis
+operator there's generally only one correct choice (in this case, the former is
+likely what was intended).
 
 # Languages
 
@@ -381,10 +445,12 @@ patterns: # key size from anchor
   - >
     &_VAR = KeyPairGenerator.getInstance(&_ARG ...)
     ..}
-    &_VAR.initialize(#KEY_SIZE)
+    &_VAR.initialize(&KEY_SIZE)
 languages:
   - java
 group: java_key
+transform:
+  KEY_SIZE: ^[0-9]
 name: unique_key_size
 ```
 ```yaml

@@ -3,7 +3,8 @@ use std::num::NonZero;
 use super::c_like::{QuoteType, StringEscaped};
 
 use crate::lexer::{
-    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType,
+    calc_start_offset,
 };
 
 use super::utf8_multibyte_part;
@@ -182,7 +183,7 @@ enum LexerEnum {
     EllipsisDotDot,
     /// used when unwinding something which could have been an ellipsis
     EmitDot,
-    /// a capture, like $str #num &ident. double to escape
+    /// a capture, like $str &ident. whitespace to escape
     Capture((usize, CaptureType)),
 }
 
@@ -227,7 +228,7 @@ impl super::Lexer for Lexer {
                             self.state = LexerEnum::line_start();
                         } else if byte.is_ascii_whitespace() || byte.is_ascii_control() {
                             // ignore
-                        } else if byte == b'#' && !self.pattern_enabled {
+                        } else if byte == b'#' {
                             self.state = LexerEnum::Comment;
                         } else if byte == b'\"' {
                             self.state = LexerEnum::DoubleQuote;
@@ -239,8 +240,6 @@ impl super::Lexer for Lexer {
                             self.state = LexerEnum::Capture((1, CaptureType::Dollar));
                         } else if byte == b'&' && self.pattern_enabled {
                             self.state = LexerEnum::Capture((1, CaptureType::Ampersand));
-                        } else if byte == b'#' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture((1, CaptureType::Number));
                         } else {
                             if byte == b'(' {
                                 self.round_bracket_lock += 1;
@@ -372,15 +371,6 @@ impl super::Lexer for Lexer {
                             self.back_one_byte();
                             if len == 1 {
                                 match capture_type {
-                                    CaptureType::Number => {
-                                        //   V
-                                        // #?
-
-                                        // ok to type # comment here, but leading space is required
-                                        // #NUM is for captures
-                                        self.state = LexerEnum::Comment;
-                                        continue;
-                                    }
                                     CaptureType::Ampersand => {
                                         return Ok(Some(ret_token(
                                             self,
@@ -424,14 +414,14 @@ impl super::Lexer for Lexer {
                                 let start_position = end_position - len;
                                 return Ok(Some(ret_token(
                                     self,
-                                    LexerTokenVariant::Number(MaybeSliceRef::Some(
+                                    LexerTokenVariant::Identifier(MaybeSliceRef::Some(
                                         &self.buffer[start_position..end_position],
                                     )),
                                 )));
                             } else {
                                 return Ok(Some(ret_token(
                                     self,
-                                    LexerTokenVariant::Number(MaybeSliceRef::Len(len)),
+                                    LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)),
                                 )));
                             }
                         }
@@ -617,13 +607,21 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' || byte == b'>' || byte == b'*' || byte == b'^' {
+                        if byte == b'.'
+                            || byte == b'>'
+                            || byte == b'*'
+                            || byte == b'}'
+                            || byte == b'?'
+                            || byte == b'^'
+                        {
                             self.state = LexerEnum::NotLineStart;
                             let t = match byte {
                                 b'.' => EllipsisEnum::Normal,
                                 b'>' => EllipsisEnum::CBE,
-                                // not applicable since python doesn't have scopes
-                                // b'}' => EllipsisEnum::SBEE,
+                                // not recommended since python scopes don't
+                                // work like that
+                                b'}' => EllipsisEnum::SBE(false),
+                                b'?' => EllipsisEnum::SBE(true),
                                 b'*' => EllipsisEnum::Jump,
                                 b'^' => EllipsisEnum::SetStart,
                                 _ => unreachable!(),
@@ -718,11 +716,11 @@ impl super::Lexer for Lexer {
                 if len <= self.max_token_length.get() {
                     let end_position = self.buffer_start_offset;
                     let start_position = end_position - len;
-                    Some(LexerTokenVariant::Number(MaybeSliceRef::Some(
+                    Some(LexerTokenVariant::Identifier(MaybeSliceRef::Some(
                         &self.buffer[start_position..end_position],
                     )))
                 } else {
-                    Some(LexerTokenVariant::Number(MaybeSliceRef::Len(len)))
+                    Some(LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)))
                 }
             }
             LexerEnum::DoubleDoubleQuote | LexerEnum::DoubleSingleQuote => {
@@ -1000,40 +998,6 @@ mod ellipsis_capture_tests {
 
         assert_eq!(lexer.next(&mut c).unwrap(), None);
         assert_eq!(lexer.drain(), None);
-    }
-
-    #[test]
-    fn number_capture() {
-        let s = b"#NUM\nabc";
-        let mut c = Cursor::new(s);
-        let mut lexer = lexer_for_test();
-
-        let tok = lexer.next(&mut c).unwrap().unwrap();
-        assert_eq!(tok.start.offset, 0);
-        assert_eq!(
-            tok.variant,
-            LexerTokenVariant::Capture(MaybeSliceRef::Some(&s[0..4]))
-        );
-
-        let tok = lexer.next(&mut c).unwrap().unwrap();
-        assert_eq!(tok.start.offset, 5);
-        assert_eq!(tok.start.line, 2);
-        assert_eq!(tok.start.column, 1);
-        assert_eq!(tok.end.offset, 5);
-        assert_eq!(tok.end.line, 2);
-        assert_eq!(tok.end.column, 1);
-        assert_eq!(
-            tok.variant,
-            LexerTokenVariant::LexicalLevelChange(0, MaybeSliceRef::Some(&s[5..5]))
-        );
-
-        assert_eq!(lexer.next(&mut c).unwrap(), None);
-        let tok = lexer.drain().unwrap();
-        assert_eq!(tok.start.offset, 5);
-        assert_eq!(
-            tok.variant,
-            LexerTokenVariant::Identifier(MaybeSliceRef::Some(&s[5..8]))
-        );
     }
 
     #[test]

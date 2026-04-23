@@ -1,7 +1,8 @@
 use std::num::NonZero;
 
 use crate::lexer::{
-    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType,
+    calc_start_offset,
 };
 
 use super::utf8_multibyte_part;
@@ -190,8 +191,6 @@ impl super::Lexer for Lexer {
                             self.state = LexerEnum::Capture((1, CaptureType::Dollar));
                         } else if byte == b'&' && self.pattern_enabled {
                             self.state = LexerEnum::Capture((1, CaptureType::Ampersand));
-                        } else if byte == b'#' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture((1, CaptureType::Number));
                         } else {
                             return Ok(Some(ret_token(self, LexerTokenVariant::Byte(byte))));
                         }
@@ -306,7 +305,6 @@ impl super::Lexer for Lexer {
                                     self,
                                     LexerTokenVariant::Byte(match capture_type {
                                         CaptureType::Ampersand => b'&',
-                                        CaptureType::Number => b'#',
                                         CaptureType::Dollar => b'$',
                                     }),
                                 )));
@@ -340,14 +338,14 @@ impl super::Lexer for Lexer {
                                 let start_position = end_position - len;
                                 return Ok(Some(ret_token(
                                     self,
-                                    LexerTokenVariant::Number(MaybeSliceRef::Some(
+                                    LexerTokenVariant::Identifier(MaybeSliceRef::Some(
                                         &self.buffer[start_position..end_position],
                                     )),
                                 )));
                             } else {
                                 return Ok(Some(ret_token(
                                     self,
-                                    LexerTokenVariant::Number(MaybeSliceRef::Len(len)),
+                                    LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)),
                                 )));
                             }
                         }
@@ -419,12 +417,19 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' || byte == b'>' || byte == b'}' || byte == b'*'  || byte == b'^' {
+                        if byte == b'.'
+                            || byte == b'>'
+                            || byte == b'}'
+                            || byte == b'?'
+                            || byte == b'*'
+                            || byte == b'^'
+                        {
                             self.state = LexerEnum::Start;
                             let t = match byte {
                                 b'.' => EllipsisEnum::Normal,
                                 b'>' => EllipsisEnum::CBE,
-                                b'}' => EllipsisEnum::SBE,
+                                b'}' => EllipsisEnum::SBE(false),
+                                b'?' => EllipsisEnum::SBE(true),
                                 b'*' => EllipsisEnum::Jump,
                                 b'^' => EllipsisEnum::SetStart,
                                 _ => unreachable!(),
@@ -508,11 +513,11 @@ impl super::Lexer for Lexer {
                 if len <= self.max_token_length.get() {
                     let end_position = self.buffer_start_offset;
                     let start_position = end_position - len;
-                    Some(LexerTokenVariant::Number(MaybeSliceRef::Some(
+                    Some(LexerTokenVariant::Identifier(MaybeSliceRef::Some(
                         &self.buffer[start_position..end_position],
                     )))
                 } else {
-                    Some(LexerTokenVariant::Number(MaybeSliceRef::Len(len)))
+                    Some(LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)))
                 }
             }
             LexerEnum::Capture((len, _capture_type)) => {
@@ -587,7 +592,7 @@ mod tests {
         assert_eq!(tok.start.column, 5);
         assert_eq!(
             tok.variant,
-            LexerTokenVariant::Number(MaybeSliceRef::Some(&s[4..7]))
+            LexerTokenVariant::Identifier(MaybeSliceRef::Some(&s[4..7]))
         );
 
         assert!(lexer.next(&mut c).unwrap().is_none());
@@ -641,7 +646,7 @@ mod tests {
         assert_eq!(tok.start.column, 1);
         assert_eq!(
             tok.variant,
-            LexerTokenVariant::Number(MaybeSliceRef::Some(&s[3..]))
+            LexerTokenVariant::Identifier(MaybeSliceRef::Some(&s[3..]))
         );
 
         assert!(lexer.drain().is_none());

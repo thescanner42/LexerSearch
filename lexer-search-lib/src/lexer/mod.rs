@@ -115,7 +115,9 @@ pub enum EllipsisEnum {
     /// ..> corner bracket ellipsis operator
     CBE,
     /// ..} scope blocking ellipsis operator
-    SBE,
+    /// 
+    /// true for ..? statement blocking
+    SBE(bool),
     /// ..*
     Jump,
     /// ..^
@@ -129,13 +131,13 @@ pub enum LexerTokenVariant<'a> {
     /// c-like languages the '{' character instead is represented with an
     /// increment in lexical level
     Byte(u8),
-    Number(MaybeSliceRef<'a>),
     /// indicates maybe range and the length of the quotation at the beginning
     /// and end of the string
     String(MaybeSliceRef<'a>, usize),
+    /// Identifier or Number
     Identifier(MaybeSliceRef<'a>),
     /// contains level change and maybe slice
-    /// 
+    ///
     /// only used in python-like
     ///  - lexical level change of 0 occurs at end of statement if no
     ///    indentation change happens on the next line
@@ -144,7 +146,7 @@ pub enum LexerTokenVariant<'a> {
     LexicalLevelChange(i32, MaybeSliceRef<'a>),
     /// only emitted when the lexer is set to process a pattern
     Ellipsis(EllipsisEnum),
-    /// $VAR, #VAR or &VAR
+    /// $VAR or &VAR
     ///
     /// only emitted when the lexer is set to process a pattern
     ///
@@ -157,9 +159,7 @@ impl<'a> LexerTokenVariant<'a> {
     pub(super) fn len(&self) -> usize {
         match self {
             LexerTokenVariant::Byte(_) => 1,
-            LexerTokenVariant::Number(ms)
-            | LexerTokenVariant::String(ms, _)
-            | LexerTokenVariant::Identifier(ms) => match ms {
+            LexerTokenVariant::String(ms, _) | LexerTokenVariant::Identifier(ms) => match ms {
                 MaybeSliceRef::Some(buf) => buf.len(),
                 MaybeSliceRef::Len(len) => *len,
             },

@@ -1,6 +1,8 @@
 use std::num::NonZero;
 
-use crate::lexer::{EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, calc_start_offset};
+use crate::lexer::{
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, calc_start_offset,
+};
 
 use super::utf8_multibyte_part;
 
@@ -86,7 +88,6 @@ pub(super) enum QuoteType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CaptureType {
     Ampersand,
-    Number,
     Dollar,
 }
 
@@ -131,7 +132,7 @@ enum LexerEnum {
     EllipsisDotDot,
     /// used when unwinding something which could have been an ellipsis
     EmitDot,
-    /// a capture, like $str #num &ident. double to escape
+    /// a capture, like $str &ident. use whitespace to escape
     Capture((usize, CaptureType)),
 }
 
@@ -207,8 +208,6 @@ impl super::Lexer for Lexer {
                             self.state = LexerEnum::Capture((1, CaptureType::Dollar));
                         } else if byte == b'&' && self.pattern_enabled {
                             self.state = LexerEnum::Capture((1, CaptureType::Ampersand));
-                        } else if byte == b'#' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture((1, CaptureType::Number));
                         } else {
                             return Ok(Some(ret_token(self, LexerTokenVariant::Byte(byte))));
                         }
@@ -266,7 +265,6 @@ impl super::Lexer for Lexer {
                                     self,
                                     LexerTokenVariant::Byte(match capture_type {
                                         CaptureType::Ampersand => b'&',
-                                        CaptureType::Number => b'#',
                                         CaptureType::Dollar => b'$',
                                     }),
                                 )));
@@ -300,14 +298,14 @@ impl super::Lexer for Lexer {
                                 let start_position = end_position - len;
                                 return Ok(Some(ret_token(
                                     self,
-                                    LexerTokenVariant::Number(MaybeSliceRef::Some(
+                                    LexerTokenVariant::Identifier(MaybeSliceRef::Some(
                                         &self.buffer[start_position..end_position],
                                     )),
                                 )));
                             } else {
                                 return Ok(Some(ret_token(
                                     self,
-                                    LexerTokenVariant::Number(MaybeSliceRef::Len(len)),
+                                    LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)),
                                 )));
                             }
                         }
@@ -383,12 +381,19 @@ impl super::Lexer for Lexer {
                         }
                     }
                     LexerEnum::EllipsisDotDot => {
-                        if byte == b'.' || byte == b'>' || byte == b'}' || byte == b'*' || byte == b'^' {
+                        if byte == b'.'
+                            || byte == b'>'
+                            || byte == b'}'
+                            || byte == b'?'
+                            || byte == b'*'
+                            || byte == b'^'
+                        {
                             self.state = LexerEnum::Start;
                             let t = match byte {
                                 b'.' => EllipsisEnum::Normal,
                                 b'>' => EllipsisEnum::CBE,
-                                b'}' => EllipsisEnum::SBE,
+                                b'}' => EllipsisEnum::SBE(false),
+                                b'?' => EllipsisEnum::SBE(true),
                                 b'*' => EllipsisEnum::Jump,
                                 b'^' => EllipsisEnum::SetStart,
                                 _ => unreachable!(),
@@ -469,11 +474,11 @@ impl super::Lexer for Lexer {
                 if len <= self.max_token_length.get() {
                     let end_position = self.buffer_start_offset;
                     let start_position = end_position - len;
-                    Some(LexerTokenVariant::Number(MaybeSliceRef::Some(
+                    Some(LexerTokenVariant::Identifier(MaybeSliceRef::Some(
                         &self.buffer[start_position..end_position],
                     )))
                 } else {
-                    Some(LexerTokenVariant::Number(MaybeSliceRef::Len(len)))
+                    Some(LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)))
                 }
             }
             LexerEnum::Capture((len, _capture_type)) => {
@@ -541,7 +546,10 @@ mod tests {
         // "..." at byte 0
         let tok = lexer.next(&mut c).unwrap().unwrap();
         assert_eq!(tok.start.offset, 0);
-        assert_eq!(tok.variant, LexerTokenVariant::Ellipsis(EllipsisEnum::Normal));
+        assert_eq!(
+            tok.variant,
+            LexerTokenVariant::Ellipsis(EllipsisEnum::Normal)
+        );
 
         assert!(lexer.next(&mut c).unwrap().is_none());
 
@@ -650,23 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn simple_capture() {
-        let s = b"#foo ";
-        let mut c = Cursor::new(s);
-        let mut lexer = lexer_for_test();
-
-        let tok = lexer.next(&mut c).unwrap().unwrap();
-        assert_eq!(tok.start.offset, 0);
-        assert_eq!(
-            tok.variant,
-            LexerTokenVariant::Capture(MaybeSliceRef::Some(b"#foo"))
-        );
-
-        assert!(lexer.next(&mut c).unwrap().is_none());
-        assert!(lexer.drain().is_none());
-    }
-
-    #[test]
     fn capture_then_identifier() {
         let s = b"$foo bar ";
         let mut c = Cursor::new(s);
@@ -742,7 +733,7 @@ mod tests {
         assert_eq!(tok.start.offset, 0);
         assert_eq!(
             tok.variant,
-            LexerTokenVariant::Number(MaybeSliceRef::Some(&[b'1', b'2']))
+            LexerTokenVariant::Identifier(MaybeSliceRef::Some(&[b'1', b'2']))
         );
 
         assert!(lexer.drain().is_none());
