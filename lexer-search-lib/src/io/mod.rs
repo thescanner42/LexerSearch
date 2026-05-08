@@ -1,9 +1,21 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, ffi::OsStr, path::Path};
+use std::{collections::BTreeMap, ffi::OsStr, path::PathBuf};
 
-use crate::{engine::matcher::FullMatch, lexer::Position};
+use crate::engine::{graph::GroupInfo, matcher::FullMatch};
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Deserialize,
+    Serialize,
+    bincode::Encode,
+    bincode::Decode,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+)]
 #[serde(deny_unknown_fields)]
 pub enum Language {
     #[serde(rename = "c")]
@@ -66,7 +78,7 @@ pub struct PatternsFile {
 
     /// empty indicates no group
     #[serde(default)]
-    pub group: String,
+    pub group: GroupInfo,
 
     /// backref name -> literal value
     #[serde(
@@ -187,83 +199,21 @@ where
 }
 
 // annotate with which file it came from
-pub struct FullMatchOut<'a> {
-    pub file: &'a Path, // NEW!
-    // the rest of these fields are from matcher::FullMatch
-    pub start: Position,
-    pub end: Position,
-    pub name: String,
-    pub group: String,
-    pub captures: &'a BTreeMap<Box<[u8]>, Box<[u8]>>,
+#[derive(serde::Serialize)]
+pub struct FullMatchOut {
+    #[serde(skip_serializing_if = "is_empty_path")]
+    pub file: PathBuf,
+    #[serde(flatten)]
+    pub m: FullMatch,
 }
 
-impl<'a> serde::Serialize for FullMatchOut<'a> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-
-        let has_captures = !self.captures.is_empty();
-
-        let has_non_empty_file = !self.file.as_os_str().is_empty();
-
-        let has_non_empty_group = !self.group.is_empty();
-
-        let mut field_count = 3;
-        if has_captures {
-            field_count += 1;
-        }
-
-        if has_non_empty_file {
-            field_count += 1;
-        }
-
-        if has_non_empty_group {
-            field_count += 1;
-        }
-
-        let mut s = serializer.serialize_struct("FullMatchOut", field_count)?;
-        // serialize the new `file` field as a string path
-        s.serialize_field("start", &self.start)?;
-        s.serialize_field("end", &self.end)?;
-
-        if has_non_empty_file {
-            s.serialize_field("file", &self.file.to_string_lossy().to_string())?;
-        }
-
-        s.serialize_field("name", &self.name)?;
-
-        if has_non_empty_group {
-            s.serialize_field("group", &self.group)?;
-        }
-
-        if has_captures {
-            let captures_serializable: BTreeMap<String, String> = self
-                .captures
-                .iter()
-                .map(|(k, v)| {
-                    let key = String::from_utf8_lossy(&k).to_string();
-                    let val = String::from_utf8_lossy(&v).to_string();
-                    (key, val)
-                })
-                .collect();
-
-            s.serialize_field("captures", &captures_serializable)?;
-        }
-
-        s.end()
-    }
+fn is_empty_path(p: &std::path::PathBuf) -> bool {
+    p.as_os_str().is_empty()
 }
 
 pub fn final_postprocess(mut m: FullMatch) -> Option<FullMatch> {
-    match m.captures.get(b"ignore".as_slice()) {
-        Some(v) => {
-            if v.as_ref() == b"true".as_slice() {
-                return None;
-            }
-        }
-        None => {}
+    if m.group.cancel {
+        return None;
     }
 
     // lastly, remove any suppressed vars

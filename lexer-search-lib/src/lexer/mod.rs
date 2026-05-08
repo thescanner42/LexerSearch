@@ -115,8 +115,8 @@ pub enum EllipsisEnum {
     /// ..> corner bracket ellipsis operator
     CBE,
     /// ..} scope blocking ellipsis operator
-    /// 
-    /// true for ..? statement blocking
+    ///
+    /// true for ..! statement blocking
     SBE(bool),
     /// ..*
     Jump,
@@ -146,12 +146,9 @@ pub enum LexerTokenVariant<'a> {
     LexicalLevelChange(i32, MaybeSliceRef<'a>),
     /// only emitted when the lexer is set to process a pattern
     Ellipsis(EllipsisEnum),
-    /// $VAR or &VAR
+    /// $VAR. contains the "$" prefix
     ///
     /// only emitted when the lexer is set to process a pattern
-    ///
-    /// on first declaration of the capture, it captures a value. on subsequent
-    /// mentioned, this instead references the previously created capture
     Capture(MaybeSliceRef<'a>),
 }
 

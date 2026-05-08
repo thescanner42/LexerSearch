@@ -1,513 +1,37 @@
 use std::{
-    cmp::Ordering, collections::{BTreeMap, BinaryHeap, HashMap}, num::NonZero, sync::Arc, usize
+    cmp::Ordering,
+    collections::{BTreeMap, BinaryHeap},
+    num::NonZero,
+    sync::Arc,
 };
-
-use serde::de::Error as SerdeError;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    engine::{canonicalizer::Canonicalizer, grouper::Grouper},
-    lexer::{EllipsisEnum, Lexer, LexerToken, LexerTokenVariant, MaybeSliceRef, Position},
+    engine::{
+        canonicalizer::Canonicalizer,
+        graph::{Graph, GraphNodeEllipsisEnum, GraphTokenVariant, GroupInfo},
+        grouper::Grouper,
+        regex_cache::RegexCache,
+        token::{Token, TokenVariant},
+    },
+    lexer::{Lexer, Position},
 };
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum BracketType {
-    #[default]
-    Round,
-    Square,
-    Corner,
-    Curly,
-}
-
-/// bounded length owned token
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum TokenVariant {
-    /// stops non-reflexive patterns
-    OverlongIdentifier,
-    /// stops non-reflexive patterns
-    OverlongString,
-
-    /// some character. like "*". this has lowest precedence. for example in
-    /// c-like languages the '{' character instead is represented with an
-    /// increment in lexical level
-    Byte(u8),
-    String(Box<[u8]>),
-    Identifier(Box<[u8]>),
-    /// see LexerTokenVariant for more details
-    LexicalLevelChange(i32),
-
-    /// only used by pattern creation logic, not matching logic
-    Ellipsis(EllipsisEnum),
-    /// only used by pattern creation logic, not matching logic
-    Capture(Box<[u8]>),
-    /// only used by pattern creation logic, not matching logic
-    OverlongCapture,
-}
-
-#[derive(Clone)]
-pub struct Token {
-    pub variant: TokenVariant,
-    pub start: Position,
-    pub end: Position,
-}
-
-impl Token {
-    fn from_lexer_token(token: LexerToken) -> Self {
-        Token {
-            variant: match token.variant {
-                LexerTokenVariant::Byte(b) => TokenVariant::Byte(b),
-                LexerTokenVariant::String(MaybeSliceRef::Len(_), _) => TokenVariant::OverlongString,
-                LexerTokenVariant::Identifier(MaybeSliceRef::Len(_)) => {
-                    TokenVariant::OverlongIdentifier
-                }
-                LexerTokenVariant::String(MaybeSliceRef::Some(items), quote_len) => {
-                    TokenVariant::String(
-                        items[quote_len..items.len() - quote_len]
-                            .to_vec()
-                            .into_boxed_slice(),
-                    )
-                }
-                LexerTokenVariant::Identifier(MaybeSliceRef::Some(items)) => {
-                    TokenVariant::Identifier(items.to_vec().into_boxed_slice())
-                }
-                LexerTokenVariant::LexicalLevelChange(delta, _maybe_items) => {
-                    TokenVariant::LexicalLevelChange(delta)
-                }
-                // not produced by lexer not configured for pattern
-                LexerTokenVariant::Ellipsis(b) => TokenVariant::Ellipsis(b),
-                LexerTokenVariant::Capture(MaybeSliceRef::Len(_)) => TokenVariant::OverlongCapture,
-                LexerTokenVariant::Capture(MaybeSliceRef::Some(items)) => {
-                    TokenVariant::Capture(items.to_vec().into_boxed_slice())
-                }
-            },
-            start: token.start,
-            end: token.end,
-        }
-    }
-}
-
-/// a non-reflexive transition in the trie-like structure
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Transition {
-    /// token literal was matched
-    Literal(TokenVariant),
-    CaptureString,
-    CaptureIdentifier,
-    /// index N on capture stack was matched
-    Backref(usize),
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct BackrefInfo {
-    name: Box<[u8]>,
-    #[serde(
-        serialize_with = "serialize_regex_opt",
-        deserialize_with = "deserialize_regex_opt"
-    )]
-    transform: Option<regex_lite::Regex>,
-}
-
-fn serialize_regex_opt<S>(r: &Option<regex_lite::Regex>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match r {
-        Some(regex) => serializer.serialize_some(regex.as_str()),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_regex_opt<'de, D>(deserializer: D) -> Result<Option<regex_lite::Regex>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt: Option<&str> = Option::deserialize(deserializer)?;
-    if let Some(expr) = opt {
-        regex_lite::Regex::new(expr)
-            .map(Some)
-            .map_err(D::Error::custom)
-    } else {
-        Ok(None)
-    }
-}
-
-/// information used after complete match found
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PatternInfo {
-    /// associates the backref index with the name and transform stated in the
-    /// pattern
-    backref_names: Box<[BackrefInfo]>,
-    /// as stated in the pattern, arbitrary user defined output for the finding
-    out: BTreeMap<Box<[u8]>, Box<[u8]>>,
-
-    /// as stated by pattern
-    name: String,
-    group: String,
-}
-
-/// indicates the type of reflexive transition (one that leads back to the same
-/// node). e.g. caused by ...
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ReflexiveTransition {
-    /// ellipsis operator not contained in any brackets
-    NormalEllipsis,
-    /// ellipsis operator contained in specified type of brackets
-    ContainedEllipsis(BracketType),
-    /// false - scope blocking, true - statement blocking
-    SBE(bool),
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct JumpInfo {
-    return_trie_position: usize,
-    new_captures_since_loop_entry: usize,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum TransitionToEnum {
-    /// dst trie node
-    NormalTransition(usize),
-    /// repitition return info
-    Jump(JumpInfo),
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct TransitionTo {
-    transition: TransitionToEnum,
-    /// from ..^
-    set_start: bool,
-}
-
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
-struct TrieNode {
-    /// empty if no complete matches
-    full_match: Vec<PatternInfo>,
-    next: HashMap<Transition, TransitionTo>,
-    reflexive: Option<ReflexiveTransition>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct Trie {
-    nodes: Vec<TrieNode>,
-}
-
-impl Default for Trie {
-    fn default() -> Self {
-        Self {
-            // default has index 0 valid but doesn't lead anywhere. required since
-            // index 0 is the start index and assumed to be ok
-            nodes: vec![Default::default()],
-        }
-    }
-}
-
-impl Trie {
-    /// add the pattern to self. if an error is returned, then self was reverted
-    /// to default (start again or exit)
-    ///
-    /// rule_name should be some unique name
-    ///
-    /// out is the arbitrary outputs defined in the pattern
-    pub fn add_pattern<L: Lexer, R: std::io::Read>(
-        &mut self,
-        r: &mut R,
-        out: &BTreeMap<Box<[u8]>, Box<[u8]>>,
-        name: String,
-        group: String,
-        transform: &BTreeMap<Box<[u8]>, String>,
-        mut lexer: L,
-        max_token_length: NonZero<usize>,
-    ) -> Result<(), String> {
-        debug_assert!(lexer.configured_for_pattern());
-        let mut trie = std::mem::take(self);
-
-        let mut canonicalizer = Canonicalizer::new(max_token_length);
-
-        // always points to a valid index (trie has min len of 1)
-        let mut trie_position: usize = 0;
-
-        // None if not currently inside ..*, Some otherwise
-        let mut trie_jump_position: Option<JumpInfo> = None;
-        // the previous TransitionTo that was followed. helpful for overall
-        // construction, when something needs to apply to the previous thing.
-        // contains the trie node and transition from that node
-        let mut previous_transition: Option<(usize, Transition)> = None;
-
-        // implement ..^ applies to next non reflexived transition
-        let mut set_start: bool = false;
-
-        // add a check for ..*
-        let mut node_is_new: bool = false;
-
-        let mut captures: HashMap<Box<[u8]>, usize> = Default::default();
-        let mut capture_count_increment = 0;
-
-        // used to determine if ... is contained in what type of brackets
-        let mut bracket_stack: Vec<BracketType> = Default::default();
-
-        loop {
-            let token = match canonicalizer.next_and_drain(|| {
-                let token = match lexer.next_and_drain(r)? {
-                    Some(s) => s,
-                    None => return Ok(None),
-                };
-
-                let token = Token::from_lexer_token(token);
-                match token.variant {
-                    TokenVariant::OverlongIdentifier
-                    | TokenVariant::OverlongString
-                    | TokenVariant::OverlongCapture => {
-                        // do not emit TokenVariant::OverlongABC here. write a sane pattern!
-                        return Err(format!(
-                            "{} line {} col {}: token too long",
-                            name, token.start.line, token.start.column
-                        ));
-                    }
-                    _ => {}
-                };
-                return Ok(Some(token));
-            })? {
-                Some(v) => v,
-                None => {
-                    fn reverse_map(
-                        captures: HashMap<Box<[u8]>, usize>,
-                        transform: &BTreeMap<Box<[u8]>, String>,
-                    ) -> Result<Box<[BackrefInfo]>, String> {
-                        let len = captures.len();
-                        let mut reversed: Vec<BackrefInfo> = Vec::with_capacity(len);
-                        reversed.resize_with(len, || Default::default());
-                        for (key, index) in captures {
-                            reversed[index].name = key[1..].to_vec().into_boxed_slice();
-
-                            let r: &Box<[u8]> = &reversed[index].name;
-                            if let Some(expr) = transform.get(r) {
-                                // if the transform accepts this backref then
-                                // set it in the pattern info
-                                let compiled = regex_lite::Regex::new(&expr).map_err(|e| {
-                                    format!("regex compilation error of '{expr}': {e}")
-                                })?;
-                                reversed[index].transform = Some(compiled);
-                            }
-                        }
-                        Ok(reversed.into_boxed_slice())
-                    }
-
-                    let mut new_out: BTreeMap<Box<[u8]>, Box<[u8]>> = Default::default();
-                    for (k, v) in out.iter() {
-                        new_out.insert(k.clone(), v.clone());
-                    }
-
-                    trie.nodes[trie_position].full_match.push(PatternInfo {
-                        backref_names: reverse_map(captures, transform)?,
-                        out: new_out,
-                        name: name.clone(),
-                        group: group.clone(),
-                    });
-                    let _ = std::mem::replace(self, trie);
-                    return Ok(());
-                }
-            };
-
-            enum PatternProduct {
-                Transition(Transition),
-                ReflexiveTransition(ReflexiveTransition),
-                Jump,
-                SetStart,
-            }
-
-            let product = match token.variant {
-                TokenVariant::OverlongIdentifier
-                | TokenVariant::OverlongString
-                | TokenVariant::OverlongCapture => unreachable!(), // discarded above
-                TokenVariant::Byte(b) => {
-                    let maybe_bracket_open = match b {
-                        b'{' => Some(BracketType::Curly),
-                        b'[' => Some(BracketType::Square),
-                        b'(' => Some(BracketType::Round),
-                        // corner brackets not used here. see cbee
-                        _ => None, // not a bracket byte from the pattern
-                    };
-
-                    if let Some(bracket_type) = maybe_bracket_open {
-                        bracket_stack.push(bracket_type);
-                    }
-
-                    let maybe_bracket_close = match b {
-                        b'}' => Some(BracketType::Curly),
-                        b']' => Some(BracketType::Square),
-                        b')' => Some(BracketType::Round),
-                        _ => None,
-                    };
-
-                    if let Some(bracket_type) = maybe_bracket_close {
-                        let mut eq = false;
-                        if let Some(pushed_type) = bracket_stack.last() {
-                            if bracket_type == *pushed_type {
-                                eq = true;
-                            }
-                        }
-
-                        if eq {
-                            bracket_stack.pop();
-                        }
-                    }
-                    PatternProduct::Transition(Transition::Literal(token.variant))
-                }
-                TokenVariant::Ellipsis(ellipsis_type) => match ellipsis_type {
-                    EllipsisEnum::Normal => match bracket_stack.last() {
-                        Some(bracket_type) => PatternProduct::ReflexiveTransition(
-                            ReflexiveTransition::ContainedEllipsis(*bracket_type),
-                        ),
-                        None => {
-                            PatternProduct::ReflexiveTransition(ReflexiveTransition::NormalEllipsis)
-                        }
-                    },
-                    EllipsisEnum::CBE => PatternProduct::ReflexiveTransition(
-                        ReflexiveTransition::ContainedEllipsis(BracketType::Corner),
-                    ),
-                    EllipsisEnum::SBE(v) => {
-                        PatternProduct::ReflexiveTransition(ReflexiveTransition::SBE(v))
-                    }
-                    EllipsisEnum::Jump => PatternProduct::Jump,
-                    EllipsisEnum::SetStart => PatternProduct::SetStart,
-                },
-                TokenVariant::Capture(items) => {
-                    PatternProduct::Transition(match captures.get(&items) {
-                        Some(ref_num) => {
-                            // capture was stated previously, this is a
-                            // backreference
-                            Transition::Backref(*ref_num)
-                        }
-                        None => {
-                            if let Some(v) = trie_jump_position.as_mut() {
-                                v.new_captures_since_loop_entry += 1;
-                            }
-                            // this capture hasn't been seen yet
-                            let ret = match items[0] {
-                                b'&' => Transition::CaptureIdentifier,
-                                b'$' => Transition::CaptureString,
-                                _ => unreachable!(),
-                            };
-                            if trie_jump_position.is_none() {
-                                captures.insert(items.into(), capture_count_increment);
-                                capture_count_increment += 1;
-                            }
-                            ret
-                        }
-                    })
-                }
-                _ => PatternProduct::Transition(Transition::Literal(token.variant)),
-            };
-
-            match product {
-                PatternProduct::SetStart => {
-                    set_start = true;
-                }
-                PatternProduct::Jump => {
-                    match trie_jump_position.take() {
-                        None => {
-                            // mark the current position for later reference
-                            // (e.g. the token before the first ..*)
-                            trie_jump_position = Some(JumpInfo {
-                                return_trie_position: trie_position,
-                                new_captures_since_loop_entry: 0,
-                            });
-                        }
-                        Some(v) => {
-                            // set the previous transition (before the second
-                            // ..*) loop to the position marked by the first ..*
-                            if let Some(previous_transition) = &previous_transition {
-                                if node_is_new {
-                                    // typical flow creates a node and then a
-                                    // transition to it. from repitition, this
-                                    // fixes it up - no need to create node
-                                    // since we are going to an existing one
-                                    trie.nodes.pop();
-                                }
-                                trie_position = v.return_trie_position;
-                                let previous_transition = trie.nodes[previous_transition.0]
-                                    .next
-                                    .get_mut(&previous_transition.1)
-                                    .unwrap(); // safe since it was added previously
-
-                                match &previous_transition.transition {
-                                    TransitionToEnum::NormalTransition(_) => {
-                                        previous_transition.transition = TransitionToEnum::Jump(v);
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                // e.g. ..* ..*
-                                return Err("..* loop lacks a source or destination".to_string());
-                            }
-                        }
-                    }
-                    previous_transition = None;
-                }
-                PatternProduct::Transition(transition) => {
-                    previous_transition = Some((trie_position, transition.clone()));
-                    let len = trie.nodes.len();
-                    let set_start = std::mem::take(&mut set_start);
-                    match trie.nodes[trie_position].next.entry(transition) {
-                        std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
-                            node_is_new = false;
-                            trie_position = match &occupied_entry.get().transition {
-                                TransitionToEnum::NormalTransition(v) => *v,
-                                TransitionToEnum::Jump(jump_info) => jump_info.return_trie_position,
-                            };
-                            occupied_entry.get_mut().set_start |= set_start;
-                        }
-                        std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                            node_is_new = true;
-                            vacant_entry.insert(TransitionTo {
-                                // create transition
-                                transition: TransitionToEnum::NormalTransition(len),
-                                set_start,
-                            });
-                            trie_position = len;
-                            trie.nodes.push(TrieNode::default());
-                        }
-                    }
-                }
-                PatternProduct::ReflexiveTransition(reflexive_transition) => {
-                    previous_transition = None;
-                    match trie.nodes[trie_position].reflexive {
-                        Some(v) => {
-                            if v != reflexive_transition {
-                                return Err(
-                                    "pattern conflict: only one reflexive transition allowed"
-                                        .to_string(),
-                                );
-                            }
-                        }
-                        None => {
-                            trie.nodes[trie_position].reflexive = Some(reflexive_transition);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct PartialMatchBracketState {
     /// depth: enforce too-long and too-short rules. bracket level while
     /// traversing (...)
     depth: u32,
-    /// indicates currently inside ..} and non zero bracket count
-    ///
-    /// allows for lexical scope bypass in too-long and too-short rules
-    sbe_storage: u32,
-    /// depth for ..?
+    /// depth for ..}
+    scope_blocking: u32,
+    /// depth for ..!
     statement_blocking: u32,
 }
 
 impl PartialMatchBracketState {
-    pub fn pass_through_sbe_info(&self) -> Self {
+    pub fn pass_through_scope_blocking(&self) -> Self {
         Self {
             depth: 0,
-            sbe_storage: self.sbe_storage,
+            scope_blocking: self.scope_blocking,
             statement_blocking: self.statement_blocking,
         }
     }
@@ -560,24 +84,51 @@ impl Ord for PartialMatch {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Default, serde::Serialize)]
 pub struct FullMatch {
     pub start: Position,
     pub end: Position,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
-    pub group: String,
+    #[serde(skip_serializing_if = "GroupInfo::is_default")]
+    pub group: GroupInfo,
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "serialize_captures_as_string_map"
+    )]
     pub captures: BTreeMap<Box<[u8]>, Box<[u8]>>,
 }
 
-pub struct Matcher<'trie> {
-    trie: &'trie Trie,
+pub fn serialize_captures_as_string_map<S>(
+    map: &BTreeMap<Box<[u8]>, Box<[u8]>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mapped: BTreeMap<String, String> = map
+        .iter()
+        .map(|(k, v)| {
+            (
+                String::from_utf8_lossy(k).into_owned(),
+                String::from_utf8_lossy(v).into_owned(),
+            )
+        })
+        .collect();
+
+    serde::Serialize::serialize(&mapped, serializer)
+}
+
+pub struct Matcher<'g> {
+    graph: &'g Graph,
     canonicalizer: Canonicalizer,
     matches: BinaryHeap<PartialMatch>,
     max_concurrent_matches: usize,
     grouper: Grouper,
+    exprs: RegexCache,
 }
 
-impl<'trie> Matcher<'trie> {
+impl<'g> Matcher<'g> {
     /// configurable param. how many different partial matches are allowed to be
     /// followed at the same time
     ///
@@ -588,18 +139,19 @@ impl<'trie> Matcher<'trie> {
     /// max_group_memory indicates the max number of full matches to hold onto
     /// while checking for overlapping group matches
     pub fn new(
-        trie: &'trie Trie,
+        graph: &'g Graph,
         max_concurrent_matches: usize,
         max_token_length: NonZero<usize>,
         max_concurrent_groups: NonZero<usize>,
         max_group_size: NonZero<usize>,
     ) -> Self {
         Self {
-            trie: trie,
+            graph: graph,
             matches: Default::default(),
             max_concurrent_matches,
             canonicalizer: Canonicalizer::new(max_token_length),
             grouper: Grouper::new(max_concurrent_groups, max_group_size),
+            exprs: Default::default(),
         }
     }
 
@@ -620,7 +172,10 @@ impl<'trie> Matcher<'trie> {
                 };
                 Ok(Some(Token::from_lexer_token(token)))
             })? {
-                Some(v) => v,
+                Some(mut v) => {
+                    v.variant.add_double_quotes();
+                    v
+                }
                 None => {
                     self.grouper.drain(&mut out);
                     return Ok(());
@@ -653,7 +208,10 @@ impl<'trie> Matcher<'trie> {
                 Ok(Some(Token::from_lexer_token(token)))
             }).unwrap() // unwrap ok since above source closure does not produce read err
              {
-                Some(v) => v,
+                Some(mut v) => {
+                    v.variant.add_double_quotes();
+                    v
+                },
                 None => {
                     self.grouper.drain(&mut out);
                     return;
@@ -692,7 +250,10 @@ impl<'trie> Matcher<'trie> {
                 };
                 Ok(Some(Token::from_lexer_token(token)))
             })? {
-                Some(v) => v,
+                Some(mut v) => {
+                    v.variant.add_double_quotes();
+                    v
+                }
                 None => return Ok(()),
             };
 
@@ -716,9 +277,10 @@ impl<'trie> Matcher<'trie> {
             BinaryHeap::with_capacity(self.max_concurrent_matches);
 
         fn explore_transitions(
+            exprs: &mut RegexCache,
             current: PartialMatch,
             input: &Token,
-            trie: &Trie,
+            graph: &Graph,
             next_matches: &mut BinaryHeap<PartialMatch>,
             max_concurrent_matches: usize,
             out: &mut impl FnMut(FullMatch),
@@ -735,12 +297,13 @@ impl<'trie> Matcher<'trie> {
             }
 
             fn handle_maybe_full_match(
-                trie: &Trie,
+                expr: &mut RegexCache,
+                graph: &Graph,
                 element: &PartialMatch,
                 last_token: &Token,
                 out: &mut impl FnMut(FullMatch),
             ) {
-                'outer: for full_match in trie.nodes[element.trie_position].full_match.iter() {
+                'outer: for full_match in graph.nodes[element.trie_position].full_match.iter() {
                     out(FullMatch {
                         start: element.start_position,
                         end: last_token.end,
@@ -756,7 +319,7 @@ impl<'trie> Matcher<'trie> {
                             // transforms applied second last
                             for (i, key) in full_match.backref_names.iter().enumerate() {
                                 if let Some(transform) = &key.transform {
-                                    let transform: &regex_lite::Regex = transform; // rust-analyzer???
+                                    let transform: &regex_lite::Regex = expr.get(transform);
                                     let haystack: &[u8] = &element.capture_stack[i];
                                     // https://github.com/rust-lang/regex/issues/1196
                                     let haystack: &str = match std::str::from_utf8(haystack) {
@@ -809,318 +372,265 @@ impl<'trie> Matcher<'trie> {
                 }
             }
 
-            fn handle_capture_and_backrefs(
-                items: &[u8],
-                capture_unit: Transition,
-                current: &PartialMatch,
-                input: &Token,
-                trie: &Trie,
-                next_matches: &mut BinaryHeap<PartialMatch>,
-                max_concurrent_matches: usize,
-                out: &mut impl FnMut(FullMatch),
-            ) {
-                // capture transition
-                if let Some(v) = trie.nodes[current.trie_position].next.get(&capture_unit) {
-                    // ok - typically a small number of captures
-                    let mut new_stack = (*current.capture_stack).clone();
-                    new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
-                    let new_stack = Arc::new(new_stack);
-                    let new_start_position = if v.set_start {
-                        input.start
-                    } else {
-                        current.start_position
-                    };
-                    let bracket_state = current.bracket_state.pass_through_sbe_info();
-                    match &v.transition {
-                        TransitionToEnum::NormalTransition(v) => {
-                            let m = PartialMatch {
-                                start_position: new_start_position,
-                                priority_position: current.priority_position,
-                                trie_position: *v,
-                                capture_stack: new_stack, // rc
-                                bracket_state,
+            match &input.variant {
+                TokenVariant::String(items) | TokenVariant::Identifier(items) => {
+                    // non-capture transition
+                    let bracket_state = current.bracket_state.pass_through_scope_blocking();
+                    for v in graph.nodes[current.trie_position].non_capture.iter() {
+                        v.handle(|index, set_start| {
+                            let new_start_position = if set_start {
+                                input.start
+                            } else {
+                                current.start_position
                             };
-                            handle_maybe_full_match(trie, &m, &input, out);
-                            handle_partial_match(next_matches, max_concurrent_matches, m);
-                        }
-                        TransitionToEnum::Jump(jump_info) => {
-                            let mut new_capture_stack: Vec<Arc<Box<[u8]>>> = (*new_stack).clone();
-                            new_capture_stack.truncate(
-                                new_capture_stack.len() - jump_info.new_captures_since_loop_entry,
-                            );
-                            let m = PartialMatch {
-                                start_position: new_start_position,
-                                priority_position: current.priority_position,
-                                trie_position: jump_info.return_trie_position,
-                                capture_stack: Arc::new(new_capture_stack), // rc
-                                bracket_state,
-                            };
-                            // handle_maybe_full_match(trie, &m, &input, out); // not possible
-                            handle_partial_match(next_matches, max_concurrent_matches, m);
-                        }
-                    }
-                }
 
-                // backref transitions
-                for (i, cap) in current.capture_stack.iter().enumerate() {
-                    if *items == ***cap {
-                        if let Some(v) = trie.nodes[current.trie_position]
-                            .next
-                            .get(&Transition::Backref(i))
-                        {
-                            match &v.transition {
-                                TransitionToEnum::NormalTransition(pos) => {
-                                    let m = PartialMatch {
-                                        start_position: if v.set_start {
-                                            input.start
-                                        } else {
-                                            current.start_position
-                                        },
-                                        priority_position: current.priority_position,
-                                        trie_position: *pos,
-                                        capture_stack: current.capture_stack.clone(),
-                                        bracket_state: current
-                                            .bracket_state
-                                            .pass_through_sbe_info(),
-                                    };
-                                    handle_maybe_full_match(trie, &m, &input, out);
-                                    handle_partial_match(next_matches, max_concurrent_matches, m);
-                                }
-                                TransitionToEnum::Jump(jump_info) => {
-                                    let mut new_capture_stack: Vec<Arc<Box<[u8]>>> =
-                                        (*current.capture_stack).clone();
-                                    new_capture_stack.truncate(
-                                        new_capture_stack.len()
-                                            - jump_info.new_captures_since_loop_entry,
-                                    );
-                                    let m = PartialMatch {
-                                        start_position: if v.set_start {
-                                            input.start
-                                        } else {
-                                            current.start_position
-                                        },
-                                        priority_position: current.priority_position,
-                                        trie_position: jump_info.return_trie_position,
-                                        capture_stack: Arc::new(new_capture_stack),
-                                        bracket_state: current
-                                            .bracket_state
-                                            .pass_through_sbe_info(),
-                                    };
-                                    // handle_maybe_full_match(trie, &m, &input, out); // not possible
-                                    handle_partial_match(next_matches, max_concurrent_matches, m);
+                            let m = PartialMatch {
+                                start_position: new_start_position,
+                                priority_position: current.priority_position,
+                                trie_position: index,
+                                capture_stack: current.capture_stack.clone(),
+                                bracket_state,
+                            };
+                            handle_maybe_full_match(exprs, graph, &m, &input, out);
+                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                        });
+                    }
+
+                    // capture transition
+                    for v in graph.nodes[current.trie_position].create_capture.iter() {
+                        // ok - typically a small number of captures
+                        let mut new_stack = (*current.capture_stack).clone();
+                        new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
+                        let new_stack = Arc::new(new_stack);
+                        v.handle(|index, set_start| {
+                            let new_start_position = if set_start {
+                                input.start
+                            } else {
+                                current.start_position
+                            };
+
+                            let m = PartialMatch {
+                                start_position: new_start_position,
+                                priority_position: current.priority_position,
+                                trie_position: index,
+                                capture_stack: new_stack.clone(), // rc
+                                bracket_state,
+                            };
+                            handle_maybe_full_match(exprs, graph, &m, &input, out);
+                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                        });
+                    }
+
+                    // backref transitions
+                    for (i, cap) in current.capture_stack.iter().enumerate() {
+                        if *items == **cap {
+                            if let Some(v) = graph.nodes[current.trie_position]
+                                .edge
+                                .get(&GraphTokenVariant::Backref(i))
+                            {
+                                for v in v.iter() {
+                                    v.handle(|v, set_start| {
+                                        let m = PartialMatch {
+                                            start_position: if set_start {
+                                                input.start
+                                            } else {
+                                                current.start_position
+                                            },
+                                            priority_position: current.priority_position,
+                                            trie_position: v,
+                                            capture_stack: current.capture_stack.clone(),
+                                            bracket_state: current
+                                                .bracket_state
+                                                .pass_through_scope_blocking(),
+                                        };
+                                        handle_maybe_full_match(exprs, graph, &m, &input, out);
+                                        handle_partial_match(
+                                            next_matches,
+                                            max_concurrent_matches,
+                                            m,
+                                        );
+                                    });
                                 }
                             }
                         }
                     }
                 }
+
+                _ => {}
             }
 
             if current.bracket_state.depth != 0 {
                 // blocked by NOT TOO SHORT rule
             } else {
                 // attempt literal transition
-                match trie.nodes[current.trie_position]
-                    .next
-                    .get(&Transition::Literal(input.variant.clone()))
-                {
-                    Some(v) => {
-                        match &v.transition {
-                            TransitionToEnum::NormalTransition(pos) => {
-                                let m = PartialMatch {
-                                    start_position: if v.set_start {
-                                        input.start
-                                    } else {
-                                        current.start_position
-                                    },
-                                    priority_position: current.priority_position,
-                                    trie_position: *pos,
-                                    capture_stack: current.capture_stack.clone(), // rc
-                                    bracket_state: current.bracket_state.pass_through_sbe_info(),
-                                };
-                                handle_maybe_full_match(trie, &m, &input, out);
-                                handle_partial_match(next_matches, max_concurrent_matches, m);
-                            }
-                            TransitionToEnum::Jump(jump_info) => {
-                                let mut new_capture_stack: Vec<Arc<Box<[u8]>>> =
-                                    (*current.capture_stack).clone();
-                                new_capture_stack.truncate(
-                                    new_capture_stack.len()
-                                        - jump_info.new_captures_since_loop_entry,
-                                );
-                                let m = PartialMatch {
-                                    start_position: if v.set_start {
-                                        input.start
-                                    } else {
-                                        current.start_position
-                                    },
-                                    priority_position: current.priority_position,
-                                    trie_position: jump_info.return_trie_position,
-                                    capture_stack: Arc::new(new_capture_stack),
-                                    bracket_state: current.bracket_state.pass_through_sbe_info(),
-                                };
-                                // handle_maybe_full_match(trie, &m, &input, out); // not possible
-                                handle_partial_match(next_matches, max_concurrent_matches, m);
-                            }
-                        }
-                    }
-                    None => {}
-                }
-
-                match &input.variant {
-                    TokenVariant::Identifier(items) => {
-                        handle_capture_and_backrefs(
-                            items,
-                            Transition::CaptureIdentifier,
-                            &current,
-                            &input,
-                            trie,
-                            next_matches,
-                            max_concurrent_matches,
-                            out,
-                        );
-                    }
-
+                let literal: Option<GraphTokenVariant> = match &input.variant {
+                    TokenVariant::Byte(b) => Some(GraphTokenVariant::Byte(*b)),
                     TokenVariant::String(items) => {
-                        handle_capture_and_backrefs(
-                            items,
-                            Transition::CaptureString,
-                            &current,
-                            &input,
-                            trie,
-                            next_matches,
-                            max_concurrent_matches,
-                            out,
-                        );
+                        Some(GraphTokenVariant::Captureable(items.clone()))
                     }
+                    TokenVariant::Identifier(items) => {
+                        Some(GraphTokenVariant::Captureable(items.clone()))
+                    }
+                    TokenVariant::LexicalLevelChange(v) => {
+                        Some(GraphTokenVariant::LexicalLevelChange(*v))
+                    }
+                    _ => None,
+                };
 
-                    _ => {}
+                if let Some(literal) = literal {
+                    if let Some(v) = graph.nodes[current.trie_position].edge.get(&literal) {
+                        for v in v {
+                            v.handle(|v, set_start| {
+                                let m = PartialMatch {
+                                    start_position: if set_start {
+                                        input.start
+                                    } else {
+                                        current.start_position
+                                    },
+                                    priority_position: current.priority_position,
+                                    trie_position: v,
+                                    capture_stack: current.capture_stack.clone(), // rc
+                                    bracket_state: current
+                                        .bracket_state
+                                        .pass_through_scope_blocking(),
+                                };
+                                handle_maybe_full_match(exprs, graph, &m, &input, out);
+                                handle_partial_match(next_matches, max_concurrent_matches, m);
+                            });
+                        }
+                    }
                 }
             }
 
-            let mut next = current;
-            let mut is_sbe = false; // a check below, just in case
-            let bracket = match trie.nodes[next.trie_position].reflexive {
-                None => return, // no reflexive transition
-                Some(reflexive) => {
-                    match reflexive {
-                        ReflexiveTransition::ContainedEllipsis(bracket_type) => bracket_type,
-                        ReflexiveTransition::SBE(_) => {
-                            is_sbe = true;
-                            BracketType::Curly
-                        }
-                        ReflexiveTransition::NormalEllipsis => {
-                            // not influence by too long or too short rule
-                            next.bracket_state = Default::default(); // clear sbe state
-                            handle_partial_match(next_matches, max_concurrent_matches, next);
-                            return;
-                        }
-                    }
-                }
-            };
+            for v in graph.nodes[current.trie_position].scope_blocking.iter() {
+                let scope_blocking_delta: i32 = match input.variant {
+                    TokenVariant::Byte(b'{') => 1,
+                    TokenVariant::Byte(b'}') => -1,
+                    TokenVariant::LexicalLevelChange(v) => v,
+                    _ => 0,
+                };
 
-            let mut continuation_valid = true; // check for NOT TOO LONG rule
-            let vals = match input.variant {
-                TokenVariant::Byte(b) => match bracket {
-                    BracketType::Round => match b {
-                        b'(' => Some(1),
-                        b')' => Some(-1),
-                        _ => None,
-                    },
-                    BracketType::Square => match b {
-                        b'[' => Some(1),
-                        b']' => Some(-1),
-                        _ => None,
-                    },
-                    BracketType::Corner => match b {
-                        b'<' => Some(1),
-                        b'>' => Some(-1),
-                        _ => None,
-                    },
-                    BracketType::Curly => match b {
-                        b'{' => Some(1),
-                        b'}' => Some(-1),
-                        _ => None,
-                    },
-                },
-                TokenVariant::LexicalLevelChange(v) => {
-                    if is_sbe {
-                        Some(v)
-                    } else {
-                        None
+                let new_scope_blocking = match current
+                    .bracket_state
+                    .scope_blocking
+                    .checked_add_signed(scope_blocking_delta)
+                {
+                    None => {
+                        // too long
+                        continue;
                     }
-                }
-                _ => None,
-            };
+                    Some(v) => v,
+                };
 
-            match trie.nodes[next.trie_position].reflexive.unwrap() {
-                ReflexiveTransition::SBE(satement_blocking) => {
-                    if satement_blocking && next.bracket_state.statement_blocking == 0 {
-                        match &input.variant {
-                            TokenVariant::Byte(b) => {
-                                if *b == b';' {
-                                    continuation_valid = false;
-                                }
-                            }
-                            TokenVariant::LexicalLevelChange(v) => {
-                                if *v == 0 {
-                                    continuation_valid = false;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            if let Some(delta) = vals {
-                match trie.nodes[next.trie_position].reflexive.unwrap() {
-                    ReflexiveTransition::ContainedEllipsis(_) => {
-                        match next.bracket_state.depth.checked_add_signed(delta) {
-                            Some(v) => {
-                                next.bracket_state.depth = v;
-                            }
-                            None => {
-                                continuation_valid = false;
-                            }
-                        }
-                    }
-                    ReflexiveTransition::SBE(statement_blocking) => {
-                        let m = if statement_blocking {
-                            &mut next.bracket_state.statement_blocking
-                        } else {
-                            // ..} separates between statements. so, reset the
-                            // per statement state
-                            next.bracket_state.statement_blocking = 0;
-                            &mut next.bracket_state.sbe_storage
-                        };
-
-                        match m.checked_add_signed(delta) {
-                            Some(v) => {
-                                *m = v;
-                            }
-                            None => {
-                                continuation_valid = false;
-                            }
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-            }
-
-            if continuation_valid {
+                let mut next = current.clone();
+                next.bracket_state.scope_blocking = new_scope_blocking;
+                // ..} is used between statements so reset the per statement state
+                next.bracket_state.statement_blocking = 0;
+                next.trie_position = *v;
                 handle_partial_match(next_matches, max_concurrent_matches, next);
-            } else {
-                // too long rule failed. the ... operator is not allowed to
-                // expand into the parent bracket scope
+            }
+
+            for v in graph.nodes[current.trie_position].statement_blocking.iter() {
+                let statement_blocking_delta: i32 = match input.variant {
+                    TokenVariant::Byte(b'{') => 1,
+                    TokenVariant::Byte(b'}') => -1,
+                    TokenVariant::LexicalLevelChange(v) => v,
+                    _ => 0,
+                };
+
+                let new_statement_blocking = match current
+                    .bracket_state
+                    .statement_blocking
+                    .checked_add_signed(statement_blocking_delta)
+                {
+                    None => {
+                        // too long
+                        continue;
+                    }
+                    Some(v) => v,
+                };
+
+                if new_statement_blocking == 0
+                    && (input.variant == TokenVariant::Byte(b';')
+                        || input.variant == TokenVariant::LexicalLevelChange(0))
+                {
+                    continue;
+                }
+
+                let mut next = current.clone();
+                next.bracket_state.statement_blocking = new_statement_blocking;
+                next.trie_position = *v;
+                handle_partial_match(next_matches, max_concurrent_matches, next);
+            }
+
+            match &graph.nodes[current.trie_position].ellipsis {
+                GraphNodeEllipsisEnum::None => {}
+                GraphNodeEllipsisEnum::UncontainedAndCorner(uncontained_items, corner_items) => {
+                    // uncontained ellipsis doesn't care about not too long and not too short rules
+                    for v in uncontained_items {
+                        let mut next = current.clone();
+                        next.bracket_state = Default::default();
+                        next.trie_position = *v;
+                        handle_partial_match(next_matches, max_concurrent_matches, next);
+                    }
+
+                    let depth_delta: i32 = match input.variant {
+                        TokenVariant::Byte(b'<') => 1,
+                        TokenVariant::Byte(b'>') => -1,
+                        _ => 0,
+                    };
+                    if let Some(new_depth) =
+                        current.bracket_state.depth.checked_add_signed(depth_delta)
+                    {
+                        for v in corner_items {
+                            let mut next = current.clone();
+                            next.bracket_state.depth = new_depth;
+                            next.trie_position = *v;
+                            handle_partial_match(next_matches, max_concurrent_matches, next);
+                        }
+                    }
+                }
+                GraphNodeEllipsisEnum::Round(items)
+                | GraphNodeEllipsisEnum::Square(items)
+                | GraphNodeEllipsisEnum::Curly(items) => {
+                    let depth_delta: i32 = match &graph.nodes[current.trie_position].ellipsis {
+                        GraphNodeEllipsisEnum::Round(_) => match input.variant {
+                            TokenVariant::Byte(b'(') => 1,
+                            TokenVariant::Byte(b')') => -1,
+                            _ => 0,
+                        },
+                        GraphNodeEllipsisEnum::Square(_) => match input.variant {
+                            TokenVariant::Byte(b'[') => 1,
+                            TokenVariant::Byte(b']') => -1,
+                            _ => 0,
+                        },
+                        GraphNodeEllipsisEnum::Curly(_) => match input.variant {
+                            TokenVariant::Byte(b'{') => 1,
+                            TokenVariant::Byte(b'}') => -1,
+                            _ => 0,
+                        },
+                        _ => unreachable!(),
+                    };
+                    if let Some(new_depth) =
+                        current.bracket_state.depth.checked_add_signed(depth_delta)
+                    {
+                        for v in items {
+                            let mut next = current.clone();
+                            next.bracket_state.depth = new_depth;
+                            next.trie_position = *v;
+                            handle_partial_match(next_matches, max_concurrent_matches, next);
+                        }
+                    }
+                }
             }
         }
 
         for m in std::mem::take(&mut self.matches).into_iter() {
             explore_transitions(
+                &mut self.exprs,
                 m,
                 &token,
-                &self.trie,
+                &self.graph,
                 &mut next_matches,
                 self.max_concurrent_matches,
                 &mut out,
@@ -1128,680 +638,15 @@ impl<'trie> Matcher<'trie> {
         }
 
         explore_transitions(
+            &mut self.exprs,
             PartialMatch::new(token.start),
             &token,
-            &self.trie,
+            &self.graph,
             &mut next_matches,
             self.max_concurrent_matches,
             &mut out,
         );
 
         self.matches = next_matches;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Cursor;
-
-    use crate::{
-        engine::matchers::{make_c_like_lexer, make_python_like_lexer, make_rust_like_lexer},
-        lexer::EnumLexer,
-    };
-
-    use super::*;
-
-    enum Language {
-        CLike,
-        PythonLike,
-        #[allow(dead_code)]
-        RustLike,
-    }
-
-    fn run_matcher_test(
-        lang: Language,
-        patterns: &'static [(&'static str, &'static [u8])],
-        subject_bytes: &'static [u8],
-        expected_matches: Vec<FullMatch>,
-    ) {
-        let mut trie = Trie::default();
-        let enum_lexer_token_size = 99.try_into().unwrap();
-        for pattern in patterns.iter() {
-            let mut cursor: std::io::Cursor<&[u8]> = Cursor::new(pattern.1);
-            let lexer: EnumLexer = match lang {
-                Language::CLike => {
-                    EnumLexer::CLike(make_c_like_lexer(false, true, enum_lexer_token_size))
-                }
-                Language::PythonLike => {
-                    EnumLexer::PythonLike(make_python_like_lexer(true, enum_lexer_token_size))
-                }
-                Language::RustLike => {
-                    EnumLexer::RustLike(make_rust_like_lexer(true, enum_lexer_token_size))
-                }
-            };
-
-            trie.add_pattern(
-                &mut cursor,
-                &Default::default(),
-                pattern.0.to_owned(),
-                "".to_owned(),
-                &Default::default(),
-                lexer,
-                enum_lexer_token_size,
-            )
-            .unwrap();
-        }
-
-        let mut cursor: std::io::Cursor<&[u8]> = Cursor::new(subject_bytes);
-        let subject_lexer: EnumLexer = match lang {
-            Language::CLike => {
-                EnumLexer::CLike(make_c_like_lexer(false, false, enum_lexer_token_size))
-            }
-            Language::PythonLike => {
-                EnumLexer::PythonLike(make_python_like_lexer(false, enum_lexer_token_size))
-            }
-            Language::RustLike => {
-                EnumLexer::RustLike(make_rust_like_lexer(false, enum_lexer_token_size))
-            }
-        };
-        let mut out: Vec<FullMatch> = Vec::new();
-        let mut matcher = Matcher::new(
-            &trie,
-            100,
-            enum_lexer_token_size,
-            1.try_into().unwrap(),
-            1.try_into().unwrap(),
-        );
-        matcher
-            .process_and_drain(&mut cursor, subject_lexer, |m| {
-                out.push(m);
-            })
-            .unwrap();
-
-        assert_eq!(out, expected_matches);
-    }
-
-    #[test]
-    fn basic_literal_test_c() {
-        run_matcher_test(
-            Language::CLike,
-            &[("basic_literal_test_c", b"literal")],
-            b"literal",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 7,
-                    column: 8,
-                    line: 1,
-                },
-                name: "basic_literal_test_c".to_string(),
-                group: "".to_string(),
-                captures: Default::default(),
-            }],
-        );
-    }
-
-    #[test]
-    fn basic_capture_test_c() {
-        run_matcher_test(
-            Language::CLike,
-            &[("basic_capture_test_c", b"$CAPTURE")],
-            b"\"something\"",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 11,
-                    column: 12,
-                    line: 1,
-                },
-                name: "basic_capture_test_c".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([(
-                    Box::from(b"CAPTURE" as &[u8]),
-                    Box::from(b"something" as &[u8]),
-                )]),
-            }],
-        );
-    }
-
-    #[test]
-    fn backref_capture_test_c() {
-        run_matcher_test(
-            Language::CLike,
-            &[("backref_capture_test_c", b"int &X = &VALUE; ... &X+=1;")],
-            b"int my_variable = 123; char ignore = 0; my_variable += 1;",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 57,
-                    column: 58,
-                    line: 1,
-                },
-                name: "backref_capture_test_c".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([
-                    (Box::from(b"X" as &[u8]), Box::from(b"my_variable" as &[u8])),
-                    (Box::from(b"VALUE" as &[u8]), Box::from(b"123" as &[u8])),
-                ]),
-            }],
-        );
-    }
-
-    #[test]
-    fn basic_literal_test_py() {
-        run_matcher_test(
-            Language::PythonLike,
-            &[("basic_literal_test_py", b"literal")],
-            b" literal",
-            vec![FullMatch {
-                start: Position {
-                    offset: 1,
-                    column: 2,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 8,
-                    column: 9,
-                    line: 1,
-                },
-                name: "basic_literal_test_py".to_string(),
-                group: "".to_string(),
-                captures: Default::default(),
-            }],
-        );
-    }
-
-    #[test]
-    fn sbe_flow_state() {
-        run_matcher_test(
-            Language::CLike,
-            &[("sbe_flow_state", b"a ..} b ..} c")],
-            b"a { b } c",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 9,
-                    column: 10,
-                    line: 1,
-                },
-                name: "sbe_flow_state".to_string(),
-                group: "".to_string(),
-                captures: Default::default(),
-            }],
-        );
-    }
-
-    #[test]
-    fn sbe_flow_state_break() {
-        run_matcher_test(
-            Language::CLike,
-            &[("sbe_flow_state_break", b"a ..} b ... c ..} d")],
-            b"a {{ b } c } d",
-            vec![],
-        );
-    }
-
-    #[test]
-    fn sbe_no_break() {
-        run_matcher_test(
-            Language::CLike,
-            &[("sbe_no_break", b"a ..} b(...) ..} c")],
-            b"a { b(test) } c",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 15,
-                    column: 16,
-                    line: 1,
-                },
-                name: "sbe_no_break".to_string(),
-                group: "".to_string(),
-                captures: Default::default(),
-            }],
-        );
-    }
-
-    #[test]
-    fn string_concatenation_canonicalization() {
-        run_matcher_test(
-            Language::CLike,
-            &[("string_literal_norm", b"$STR")],
-            b"\"abc\" \"def\"",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 11,
-                    column: 12,
-                    line: 1,
-                },
-                name: "string_literal_norm".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([(
-                    Box::from(b"STR" as &[u8]),
-                    Box::from(b"abcdef" as &[u8]),
-                )]),
-            }],
-        );
-    }
-
-    #[test]
-    fn string_concatenation_canonicalization2() {
-        run_matcher_test(
-            Language::CLike,
-            &[("string_literal_norm2", b"$STR")],
-            b"\"abc\"+\"def\"",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 11,
-                    column: 12,
-                    line: 1,
-                },
-                name: "string_literal_norm2".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([(
-                    Box::from(b"STR" as &[u8]),
-                    Box::from(b"abcdef" as &[u8]),
-                )]),
-            }],
-        );
-    }
-
-    #[test]
-    fn string_concatenation_canonicalization_pattern() {
-        run_matcher_test(
-            Language::CLike,
-            &[("string_literal_norm_pattern", b"\"a\" \"b\" \"c\" hi")],
-            b"\"ab\" \"c\" hi",
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 11,
-                    column: 12,
-                    line: 1,
-                },
-                name: "string_literal_norm_pattern".to_string(),
-                group: "".to_string(),
-                captures: Default::default(),
-            }],
-        );
-    }
-
-    #[test]
-    fn java_function_call_test() {
-        run_matcher_test(
-            Language::CLike,
-            &[("java_function_call_test", b"getInstance($ALG ...)")],
-            b"Cipher c = Cipher.getInstance(\"DES\");",
-            vec![FullMatch {
-                start: Position {
-                    offset: 18,
-                    column: 19,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 36,
-                    column: 37,
-                    line: 1,
-                },
-                name: "java_function_call_test".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([(
-                    Box::from(b"ALG" as &[u8]),
-                    Box::from(b"DES" as &[u8]),
-                )]),
-            }],
-        );
-    }
-
-    #[test]
-    fn python_function_call_test() {
-        run_matcher_test(
-            Language::PythonLike,
-            &[(
-                "python_function_call_test",
-                br#"&VAR = &NUM
-...
-abc(... kwar=&VAR ...)"#,
-            )],
-            br#"
-x = 20
-# COMMENTS AND STUFF
-abc(kwar=x)
-"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 1,
-                    column: 1,
-                    line: 2,
-                },
-                end: Position {
-                    offset: 40,
-                    column: 12,
-                    line: 4,
-                },
-                name: "python_function_call_test".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([
-                    (Box::from(b"NUM" as &[u8]), Box::from(b"20" as &[u8])),
-                    (Box::from(b"VAR" as &[u8]), Box::from(b"x" as &[u8])),
-                ]),
-            }],
-        );
-    }
-
-    #[test]
-    fn ellipsis_brackets() {
-        // without proper bracket scope handling, 3 matches would appear, when
-        // only 1 is correct
-        run_matcher_test(
-            Language::CLike,
-            &[(
-                "ellipsis_brackets",
-                br#"
-let &VAR = 123;
-...
-test(...&VAR...)
-                "#,
-            )],
-            br#"
-let y = 123;
-let x = 123;
-test( (), y, () );
-// stuff
-// here
-other_function( (), x, () );
-"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 1,
-                    column: 1,
-                    line: 2,
-                },
-                end: Position {
-                    offset: 44,
-                    column: 18,
-                    line: 4,
-                },
-                name: "ellipsis_brackets".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([(Box::from(b"VAR" as &[u8]), Box::from(b"y" as &[u8]))]),
-            }],
-        );
-    }
-
-    #[test]
-    fn corner_brackets_ignored() {
-        // without proper bracket scope handling, 3 matches would appear, when
-        // only 1 is correct
-        run_matcher_test(
-            Language::RustLike,
-            &[(
-                "corner_brackets_ignored",
-                br#"
-match ... { ... }
-"#,
-            )],
-            br#"
-match value {
-    1 => println!("yes"),
-    _ => println!("no"),
-}
-"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 1,
-                    column: 1,
-                    line: 2,
-                },
-                end: Position {
-                    offset: 67,
-                    column: 2,
-                    line: 5,
-                },
-                name: "corner_brackets_ignored".to_string(),
-                group: "".to_string(),
-                captures: Default::default(),
-            }],
-        );
-    }
-
-    #[test]
-    fn corner_bracket_aware() {
-        run_matcher_test(
-            Language::CLike,
-            &[(
-                "corner_brackets_aware",
-                br#"
-vector<..>>
-"#,
-            )],
-            br#"
-vector<int> a; vector<int> b;
-"#,
-            // two matches, not three
-            vec![
-                FullMatch {
-                    start: Position {
-                        offset: 1,
-                        column: 1,
-                        line: 2,
-                    },
-                    end: Position {
-                        offset: 12,
-                        column: 12,
-                        line: 2,
-                    },
-                    name: "corner_brackets_aware".to_string(),
-                    group: "".to_string(),
-                    captures: Default::default(),
-                },
-                FullMatch {
-                    start: Position {
-                        offset: 16,
-                        column: 16,
-                        line: 2,
-                    },
-                    end: Position {
-                        offset: 27,
-                        column: 27,
-                        line: 2,
-                    },
-                    name: "corner_brackets_aware".to_string(),
-                    group: "".to_string(),
-                    captures: Default::default(),
-                },
-            ],
-        );
-    }
-
-    #[test]
-    fn ellipsis_lexical_scope_brackets() {
-        run_matcher_test(
-            Language::CLike,
-            &[(
-                "lexical_brackets",
-                br#"
-let &VAR = &NUM;
-..}
-test(&VAR);
-                "#,
-            )],
-            br#"
-let x = 123;
-{
-    let x = 456;
-}
-// only one!
-test(x);
-"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 1,
-                    column: 1,
-                    line: 2,
-                },
-                end: Position {
-                    offset: 56,
-                    column: 9,
-                    line: 7,
-                },
-                name: "lexical_brackets".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([
-                    (Box::from(b"VAR" as &[u8]), Box::from(b"x" as &[u8])),
-                    (Box::from(b"NUM" as &[u8]), Box::from(b"123" as &[u8])),
-                ]),
-            }],
-        );
-    }
-
-    #[test]
-    fn python_scope() {
-        run_matcher_test(
-            Language::PythonLike, //
-            &[("python scopes", br#"&VAR = &NUM...&VAR"#)],
-            br#"if True:
-    x = 42
-x
-"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 13,
-                    column: 5,
-                    line: 2,
-                },
-                end: Position {
-                    offset: 21,
-                    column: 2,
-                    line: 3,
-                },
-                name: "python scopes".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([
-                    (Box::from(b"VAR" as &[u8]), Box::from(b"x" as &[u8])),
-                    (Box::from(b"NUM" as &[u8]), Box::from(b"42" as &[u8])),
-                ]),
-            }],
-        );
-    }
-
-    #[test]
-    fn lexical_increase() {
-        run_matcher_test(
-            Language::CLike,
-            &[("lexical_increase", br#"&VAR...something(&VAR)"#)],
-            br#"
-int x = 100;
-{
-    something(x);
-}"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 5,
-                    column: 5,
-                    line: 2,
-                },
-                end: Position {
-                    offset: 32,
-                    column: 17,
-                    line: 4,
-                },
-                name: "lexical_increase".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([(Box::from(b"VAR" as &[u8]), Box::from(b"x" as &[u8]))]),
-            }],
-        );
-    }
-
-    #[test]
-    fn qualify_name() {
-        run_matcher_test(
-            Language::CLike,
-            &[("qualify_name", br#"&NAME = &ABC ..* . &DEF ..* + &PARAM;"#)],
-            br#"out = a.b.c.d + v;"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 18,
-                    column: 19,
-                    line: 1,
-                },
-                name: "qualify_name".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([
-                    (Box::from(b"NAME" as &[u8]), Box::from(b"out" as &[u8])),
-                    (Box::from(b"ABC" as &[u8]), Box::from(b"a" as &[u8])),
-                    (Box::from(b"PARAM" as &[u8]), Box::from(b"v" as &[u8])),
-                ]),
-            }],
-        );
-    }
-
-    #[test]
-    fn qualify_name_backref() {
-        run_matcher_test(
-            Language::CLike,
-            &[(
-                "qualify_name_backref",
-                br#"&NAME = &ABC ..* . &NAME ..* + &PARAM;"#,
-            )],
-            br#"out = a.out.out.out + v;"#,
-            vec![FullMatch {
-                start: Position {
-                    offset: 0,
-                    column: 1,
-                    line: 1,
-                },
-                end: Position {
-                    offset: 24,
-                    column: 25,
-                    line: 1,
-                },
-                name: "qualify_name_backref".to_string(),
-                group: "".to_string(),
-                captures: BTreeMap::from([
-                    (Box::from(b"NAME" as &[u8]), Box::from(b"out" as &[u8])),
-                    (Box::from(b"ABC" as &[u8]), Box::from(b"a" as &[u8])),
-                    (Box::from(b"PARAM" as &[u8]), Box::from(b"v" as &[u8])),
-                ]),
-            }],
-        );
     }
 }

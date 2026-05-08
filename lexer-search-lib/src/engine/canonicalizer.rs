@@ -1,7 +1,7 @@
 use std::num::NonZero;
 
 use crate::{
-    engine::matcher::{Token, TokenVariant},
+    engine::token::{Token, TokenVariant},
     lexer::Position,
 };
 

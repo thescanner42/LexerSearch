@@ -1,6 +1,12 @@
-use std::{collections::BTreeMap, num::NonZero};
+use std::{
+    collections::{BTreeMap, HashSet},
+    num::NonZero,
+};
 
-use crate::{engine::matcher::FullMatch, lexer::Position};
+use crate::{
+    engine::{graph::GroupInfo, matcher::FullMatch},
+    lexer::Position,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct FullMatchInGroup {
@@ -8,11 +14,15 @@ pub struct FullMatchInGroup {
     start: Position,
     end: Position,
     captures: BTreeMap<Box<[u8]>, Box<[u8]>>,
+    // fields from GroupInfo
+    unique: bool,
+    cancel: bool,
+    r#match: HashSet<Box<[u8]>>,
 }
 
 impl FullMatchInGroup {
     pub fn from_full_match(i: FullMatch) -> Result<(FullMatchInGroup, String), FullMatch> {
-        if i.group.is_empty() {
+        if i.group.name.is_empty() {
             Err(i)
         } else {
             Ok((
@@ -21,8 +31,11 @@ impl FullMatchInGroup {
                     start: i.start,
                     end: i.end,
                     captures: i.captures,
+                    unique: i.group.unique,
+                    cancel: i.group.cancel,
+                    r#match: i.group.r#match,
                 },
-                i.group,
+                i.group.name,
             ))
         }
     }
@@ -103,10 +116,7 @@ impl Group {
         }
 
         for (k, in_v) in m.captures.iter() {
-            if k.strip_prefix(b"_")
-                .unwrap_or(k)
-                .starts_with(b"SAME".as_slice())
-            {
+            if m.r#match.contains(k) {
                 for i in 0..self.data_len {
                     // both declare a same variable then those variables
                     // must match - otherwise these are unrelated
@@ -129,7 +139,7 @@ impl Group {
                     return EvictedMatch::Accepted(m);
                 }
 
-                if m_clone.name.starts_with("unique") {
+                if m_clone.unique {
                     let mut me_dup = self.clone();
                     std::mem::swap(&mut m, &mut me_dup.data[i]);
                     me_dup.recalculate_intersection();
@@ -167,12 +177,23 @@ impl Group {
 
     pub fn consume(mut self) -> FullMatch {
         let union = self.union();
+        let mut any_cancel: bool = false;
+        for m in self.data.iter() {
+            any_cancel |= m.cancel
+        }
+
         let first = &mut self.data[0];
+
         let mut ret = FullMatch {
             start: union.0,
             end: union.1,
             name: self.group_name,
-            group: "".to_string(),
+            group: GroupInfo {
+                name: Default::default(),
+                unique: Default::default(),
+                cancel: any_cancel,
+                r#match: Default::default(),
+            },
             captures: std::mem::take(&mut first.captures),
         };
         for m in &mut self.data[1..self.data_len] {
@@ -278,6 +299,8 @@ impl Grouper {
 
 #[cfg(test)]
 mod tests {
+    use crate::engine::graph::GroupInfo;
+
     use super::*;
     use std::{collections::BTreeMap, num::NonZero};
 
@@ -289,7 +312,13 @@ mod tests {
         }
     }
 
-    fn fm(name: &str, group: &str, start: usize, end: usize, caps: &[(&[u8], &[u8])]) -> FullMatch {
+    fn fm(
+        name: &str,
+        group: GroupInfo,
+        start: usize,
+        end: usize,
+        caps: &[(&[u8], &[u8])],
+    ) -> FullMatch {
         let mut captures = BTreeMap::new();
         for (k, v) in caps {
             captures.insert(Box::from(*k), Box::from(*v));
@@ -297,7 +326,7 @@ mod tests {
 
         FullMatch {
             name: name.to_string(),
-            group: group.to_string(),
+            group,
             start: pos(start),
             end: pos(end),
             captures,
@@ -306,7 +335,7 @@ mod tests {
 
     #[test]
     fn full_match_in_group_rejects_empty_group() {
-        let m = fm("x", "", 0, 10, &[]);
+        let m = fm("x", Default::default(), 0, 10, &[]);
         let res = FullMatchInGroup::from_full_match(m.clone());
 
         assert_eq!(res, Err(m));
@@ -314,7 +343,18 @@ mod tests {
 
     #[test]
     fn full_match_in_group_accepts_non_empty_group() {
-        let m = fm("x", "g", 0, 10, &[]);
+        let m = fm(
+            "x",
+            GroupInfo {
+                name: "g".to_owned(),
+                unique: Default::default(),
+                r#match: Default::default(),
+                cancel: false,
+            },
+            0,
+            10,
+            &[],
+        );
         let (mig, group) = FullMatchInGroup::from_full_match(m).unwrap();
 
         assert_eq!(group, "g");
@@ -325,15 +365,37 @@ mod tests {
 
     #[test]
     fn group_insert_respects_capacity() {
-        let first = FullMatchInGroup::from_full_match(fm("a", "g", 0, 10, &[]))
-            .unwrap()
-            .0;
+        let first = FullMatchInGroup::from_full_match(fm(
+            "a",
+            GroupInfo {
+                name: "g".to_owned(),
+                unique: Default::default(),
+                r#match: Default::default(),
+                cancel: Default::default(),
+            },
+            0,
+            10,
+            &[],
+        ))
+        .unwrap()
+        .0;
 
         let mut group = Group::new(NonZero::new(1).unwrap(), "g".into(), first);
 
-        let second = FullMatchInGroup::from_full_match(fm("b", "g", 0, 10, &[]))
-            .unwrap()
-            .0;
+        let second = FullMatchInGroup::from_full_match(fm(
+            "b",
+            GroupInfo {
+                name: "g".to_owned(),
+                unique: Default::default(),
+                r#match: Default::default(),
+                cancel: Default::default(),
+            },
+            0,
+            10,
+            &[],
+        ))
+        .unwrap()
+        .0;
 
         assert!(matches!(group.insert(second), EvictedMatch::NotAccepted(_)));
     }
@@ -343,7 +405,7 @@ mod tests {
         let mut grouper = Grouper::new(NonZero::new(2).unwrap(), NonZero::new(2).unwrap());
 
         let mut out = Vec::new();
-        grouper.process(fm("x", "", 0, 5, &[]), |m| out.push(m));
+        grouper.process(fm("x", Default::default(), 0, 5, &[]), |m| out.push(m));
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "x");
@@ -355,13 +417,35 @@ mod tests {
         let mut out = Vec::new();
 
         grouper.process(
-            fm("a", "g", 0, 10, &[("a".as_bytes(), "1".as_bytes())]),
+            fm(
+                "a",
+                GroupInfo {
+                    name: "g".to_owned(),
+                    unique: Default::default(),
+                    r#match: Default::default(),
+                    cancel: Default::default(),
+                },
+                0,
+                10,
+                &[("a".as_bytes(), "1".as_bytes())],
+            ),
             |_| {},
         );
 
         // Same start, different end → valid group member
         grouper.process(
-            fm("b", "g", 0, 8, &[("b".as_bytes(), "2".as_bytes())]),
+            fm(
+                "b",
+                GroupInfo {
+                    name: "g".to_owned(),
+                    unique: Default::default(),
+                    r#match: Default::default(),
+                    cancel: Default::default(),
+                },
+                0,
+                8,
+                &[("b".as_bytes(), "2".as_bytes())],
+            ),
             |_| {},
         );
 
@@ -381,8 +465,36 @@ mod tests {
         let mut grouper = Grouper::new(NonZero::new(1).unwrap(), NonZero::new(1).unwrap());
         let mut out = Vec::new();
 
-        grouper.process(fm("a", "g1", 0, 10, &[]), |_| {});
-        grouper.process(fm("b", "g2", 20, 30, &[]), |m| out.push(m));
+        grouper.process(
+            fm(
+                "a",
+                GroupInfo {
+                    name: "g1".to_owned(),
+                    unique: Default::default(),
+                    r#match: Default::default(),
+                    cancel: Default::default(),
+                },
+                0,
+                10,
+                &[],
+            ),
+            |_| {},
+        );
+        grouper.process(
+            fm(
+                "b",
+                GroupInfo {
+                    name: "g2".to_owned(),
+                    unique: Default::default(),
+                    r#match: Default::default(),
+                    cancel: Default::default(),
+                },
+                20,
+                30,
+                &[],
+            ),
+            |m| out.push(m),
+        );
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "g1");

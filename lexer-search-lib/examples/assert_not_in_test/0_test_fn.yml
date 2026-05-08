@@ -2,11 +2,13 @@ patterns:
 - |-
   #[test] // annotation
   ..* #[...] ..* // multiple times
-  fn &_F(...) {...} // fn
+  ..* pub ..*
+  ..* pub(...) ..*
+  ..* $_ ..* // various qualifiers
+  fn $_F(...) {...} // fn
 name: test_fn
-group: assert_not_in_fn
+group:
+  name: assert_not_in_fn
+  cancel: true
 languages:
   - rust
-out:
-  ignore: 'true'
-transform: {}

@@ -1,0 +1,13 @@
+patterns: # distance from anchor
+  - >
+    $_VAR = TransportGenerator.create(...)
+    ..}
+    $_VAR.travel($DISTANCE)
+languages:
+  - java
+transform:
+  DISTANCE: ^[0-9]
+group:
+  name: travel_group
+  unique: true
+name: distance

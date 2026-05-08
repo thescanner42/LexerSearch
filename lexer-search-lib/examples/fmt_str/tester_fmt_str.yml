@@ -1,0 +1,14 @@
+# detects variable in format string
+# not comprehensive. specifically like: {x}
+patterns:
+  - >
+    $_VAR = $_STR;
+    ..}
+    println!($_EXPR)
+languages:
+  - rust
+name: fmt_test_example
+out:
+  literal_key: literal_value
+transform:
+  _EXPR: ^\"\{(?<_VAR>[^}]+)}\"$

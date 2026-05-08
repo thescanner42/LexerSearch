@@ -1,26 +1,27 @@
 patterns:
 - |-
-  free(&_SAME_V);
+  free($_VAR);
   ..}
-  &_SAME_V = NULL;
+  $_VAR = NULL;
   ..}
-  free(&_SAME_V);
+  free($_VAR);
 - |-
-  free(&_SAME_V);
+  free($_VAR);
   ..}
-  &_SAME_V = 0;
+  $_VAR = 0;
   ..}
-  free(&_SAME_V);
+  free($_VAR);
 - |-
-  free(&_SAME_V);
+  free($_VAR);
   ..}
-  &_SAME_V = malloc(...);
+  $_VAR = malloc(...);
   ..}
-  free(&_SAME_V);
+  free($_VAR);
 name: exclude
-group: double_free
+group:
+  name: double_free
+  match:
+    - _VAR
+  cancel: true
 languages:
   - c
-out:
-  ignore: 'true'
-transform: {}

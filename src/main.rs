@@ -13,7 +13,7 @@ use crossbeam::channel::bounded;
 use lexer_search_lib::{
     engine::{
         matcher::{FullMatch, Matcher},
-        matchers::{Tries, make_c_like_lexer, make_python_like_lexer, make_rust_like_lexer},
+        matchers::{Graphs, make_c_like_lexer, make_python_like_lexer, make_rust_like_lexer},
     },
     io::{FullMatchOut, Language, final_postprocess},
     lexer::DEFAULT_MAX_TOKEN_LENGTH,
@@ -42,6 +42,11 @@ pub struct Args {
     /// matches per group
     #[arg(default_value_t = 10.try_into().unwrap())]
     pub max_group_size: NonZero<usize>,
+
+    /// emit matcher graph debug information
+    #[cfg(not(feature = "embed-patterns"))]
+    #[arg(long)]
+    pub debug_graph: bool,
 }
 
 #[cfg(feature = "embed-patterns")]
@@ -55,13 +60,19 @@ fn main() -> Result<(), String> {
     let tries = {
         #[cfg(not(feature = "embed-patterns"))]
         {
-            Tries::construct_tries(&args.patterns_path, args.max_token_length)?
+            let r = Graphs::construct_graphs(&args.patterns_path, args.max_token_length)?;
+            if args.debug_graph {
+                let out = serde_json::to_string(&r).map_err(|e| e.to_string())?;
+                println!("{}", out);
+                return Ok(());
+            }
+            r
         }
 
         #[cfg(feature = "embed-patterns")]
         {
-            let res =
-                bincode::serde::decode_from_slice(EMBEDDED_PATTERNS, bincode::config::standard())
+            let res: (Graphs, _) =
+                bincode::decode_from_slice(EMBEDDED_PATTERNS, bincode::config::standard())
                     .expect("failed to load embedded patterns");
             res.0
         }
@@ -96,7 +107,7 @@ fn main() -> Result<(), String> {
                             Err(_) => continue,
                         };
                         let mut r = BufReader::new(file);
-                        let trie = tries.trie_for_lang(lang);
+                        let trie = tries.graph_for_lang(lang);
                         let mut matcher = Matcher::new(
                             trie,
                             args.max_concurrent_matches,
@@ -108,12 +119,8 @@ fn main() -> Result<(), String> {
                         let write_out_finding = |m: FullMatch| {
                             if let Some(m) = final_postprocess(m) {
                                 let out = FullMatchOut {
-                                    file: path.strip_prefix(&scan_path).unwrap(),
-                                    start: m.start,
-                                    end: m.end,
-                                    name: m.name,
-                                    group: m.group,
-                                    captures: &m.captures,
+                                    file: path.strip_prefix(&scan_path).unwrap().to_path_buf(),
+                                    m: m,
                                 };
                                 println!("{}", serde_json::to_string(&out).unwrap());
                             }

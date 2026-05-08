@@ -1,9 +1,7 @@
 patterns:
 - |-
   assert_eq!(...);
-name: ''
-group: assert_not_in_fn
+group:
+  name: assert_not_in_fn
 languages:
   - rust
-out: {}
-transform: {}

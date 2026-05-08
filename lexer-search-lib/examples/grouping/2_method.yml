@@ -1,0 +1,12 @@
+patterns: # travel method from anchor
+  - >
+    String $_VAR = $_EXP;
+    ..}
+    TransportGenerator.create($_VAR ...)
+languages:
+  - java
+name: method
+transform:
+  _EXP: "^\"(?<METHOD>.*)\"$"
+group:
+  name: travel_group

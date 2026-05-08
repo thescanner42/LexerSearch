@@ -1,14 +1,14 @@
 # detects when a string of a specific pattern is used as the only arg to a function
 patterns:
   - >
-    &_VAR = $_STR;
+    $VAR = $STR;
     ..}
-    my_function(&_VAR)
-  - my_function($_STR)
+    my_function($VAR)
+  - my_function($STR)
 name: transform_regex
 languages:
   - rust
 transform:
-  _STR: ^(?<ALG>[^-]+)-(?<KEY_SIZE>\d+)$
+  STR: ^\"(?<FIRST>[^-]+)-(?<SECOND>\d+)\"$
 out:
   literal_key: literal_value

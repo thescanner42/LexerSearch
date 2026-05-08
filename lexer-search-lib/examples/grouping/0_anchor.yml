@@ -1,0 +1,8 @@
+patterns: # "anchor" pattern
+  - >
+    TransportGenerator.create(...)
+languages:
+  - java
+group:
+  name: travel_group
+name: anchor

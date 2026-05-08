@@ -1,6 +1,9 @@
 use std::{num::NonZeroUsize, path::Path};
 
-use crate::{engine::matcher::Trie, io::Language};
+use crate::{
+    engine::graph::{Graph, GraphBuilder},
+    io::Language,
+};
 
 pub fn make_c_like_lexer(
     backtick_strings: bool,
@@ -41,56 +44,97 @@ pub fn make_rust_like_lexer(
     .unwrap()
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Tries {
-    c_trie: Trie,
-    cpp_trie: Trie,
-    csharp_trie: Trie,
-    go_trie: Trie,
-    java_trie: Trie,
-    js_trie: Trie,
-    kotlin_trie: Trie,
-    python_trie: Trie,
-    rust_trie: Trie,
-    ts_trie: Trie,
+#[derive(Default, Debug)]
+struct GraphsBuilder {
+    c_graph: GraphBuilder,
+    cpp_graph: GraphBuilder,
+    csharp_graph: GraphBuilder,
+    go_graph: GraphBuilder,
+    java_graph: GraphBuilder,
+    js_graph: GraphBuilder,
+    kotlin_graph: GraphBuilder,
+    python_graph: GraphBuilder,
+    rust_graph: GraphBuilder,
+    ts_graph: GraphBuilder,
 }
 
-impl Tries {
-    pub fn trie_for_lang(&self, lang: Language) -> &Trie {
+impl GraphsBuilder {
+    pub fn graph_for_lang_mut(&mut self, lang: Language) -> &mut GraphBuilder {
         match lang {
-            Language::C => &self.c_trie,
-            Language::Cpp => &self.cpp_trie,
-            Language::CSharp => &self.csharp_trie,
-            Language::Go => &self.go_trie,
-            Language::Java => &self.java_trie,
-            Language::Js => &self.js_trie,
-            Language::Kotlin => &self.kotlin_trie,
-            Language::Py => &self.python_trie,
-            Language::Rust => &self.rust_trie,
-            Language::Ts => &self.ts_trie,
+            Language::C => &mut self.c_graph,
+            Language::Cpp => &mut self.cpp_graph,
+            Language::CSharp => &mut self.csharp_graph,
+            Language::Go => &mut self.go_graph,
+            Language::Java => &mut self.java_graph,
+            Language::Js => &mut self.js_graph,
+            Language::Kotlin => &mut self.kotlin_graph,
+            Language::Py => &mut self.python_graph,
+            Language::Rust => &mut self.rust_graph,
+            Language::Ts => &mut self.ts_graph,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, bincode::Encode, bincode::Decode)]
+pub struct Graphs {
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    c_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    cpp_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    csharp_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    go_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    java_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    js_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    kotlin_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    python_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    rust_graph: Graph,
+    #[serde(skip_serializing_if = "Graph::is_default")]
+    ts_graph: Graph,
+}
+
+impl Graphs {
+    pub fn graph_for_lang(&self, lang: Language) -> &Graph {
+        match lang {
+            Language::C => &self.c_graph,
+            Language::Cpp => &self.cpp_graph,
+            Language::CSharp => &self.csharp_graph,
+            Language::Go => &self.go_graph,
+            Language::Java => &self.java_graph,
+            Language::Js => &self.js_graph,
+            Language::Kotlin => &self.kotlin_graph,
+            Language::Py => &self.python_graph,
+            Language::Rust => &self.rust_graph,
+            Language::Ts => &self.ts_graph,
         }
     }
 
-    pub fn trie_for_lang_mut(&mut self, lang: Language) -> &mut Trie {
+    pub fn graph_for_lang_mut(&mut self, lang: Language) -> &mut Graph {
         match lang {
-            Language::C => &mut self.c_trie,
-            Language::Cpp => &mut self.cpp_trie,
-            Language::CSharp => &mut self.csharp_trie,
-            Language::Go => &mut self.go_trie,
-            Language::Java => &mut self.java_trie,
-            Language::Js => &mut self.js_trie,
-            Language::Kotlin => &mut self.kotlin_trie,
-            Language::Py => &mut self.python_trie,
-            Language::Rust => &mut self.rust_trie,
-            Language::Ts => &mut self.ts_trie,
+            Language::C => &mut self.c_graph,
+            Language::Cpp => &mut self.cpp_graph,
+            Language::CSharp => &mut self.csharp_graph,
+            Language::Go => &mut self.go_graph,
+            Language::Java => &mut self.java_graph,
+            Language::Js => &mut self.js_graph,
+            Language::Kotlin => &mut self.kotlin_graph,
+            Language::Py => &mut self.python_graph,
+            Language::Rust => &mut self.rust_graph,
+            Language::Ts => &mut self.ts_graph,
         }
     }
 
-    pub fn construct_tries(
+    pub fn construct_graphs(
         pattern_path: &Path,
         max_token_length: NonZeroUsize,
     ) -> Result<Self, String> {
-        let mut tries = Tries::default();
+        let mut builders = GraphsBuilder::default();
 
         for entry in walkdir::WalkDir::new(pattern_path)
             .into_iter()
@@ -115,7 +159,7 @@ impl Tries {
                                     | Language::Cpp
                                     | Language::CSharp
                                     | Language::Java => {
-                                        tries.trie_for_lang_mut(*lang).add_pattern(
+                                        builders.graph_for_lang_mut(*lang).add_pattern(
                                             &mut reader,
                                             &patterns_file.out,
                                             patterns_file.name.clone(),
@@ -129,7 +173,7 @@ impl Tries {
                                     | Language::Js
                                     | Language::Ts
                                     | Language::Kotlin => {
-                                        tries.trie_for_lang_mut(*lang).add_pattern(
+                                        builders.graph_for_lang_mut(*lang).add_pattern(
                                             &mut reader,
                                             &patterns_file.out,
                                             patterns_file.name.clone(),
@@ -140,7 +184,7 @@ impl Tries {
                                         )?;
                                     }
                                     Language::Py => {
-                                        tries.trie_for_lang_mut(*lang).add_pattern(
+                                        builders.graph_for_lang_mut(*lang).add_pattern(
                                             &mut reader,
                                             &patterns_file.out,
                                             patterns_file.name.clone(),
@@ -151,7 +195,7 @@ impl Tries {
                                         )?;
                                     }
                                     Language::Rust => {
-                                        tries.trie_for_lang_mut(*lang).add_pattern(
+                                        builders.graph_for_lang_mut(*lang).add_pattern(
                                             &mut reader,
                                             &patterns_file.out,
                                             patterns_file.name.clone(),
@@ -169,6 +213,17 @@ impl Tries {
             }
         }
 
-        Ok(tries)
+        Ok(Graphs {
+            c_graph: builders.c_graph.build()?,
+            cpp_graph: builders.cpp_graph.build()?,
+            csharp_graph: builders.csharp_graph.build()?,
+            go_graph: builders.go_graph.build()?,
+            java_graph: builders.java_graph.build()?,
+            js_graph: builders.js_graph.build()?,
+            kotlin_graph: builders.kotlin_graph.build()?,
+            python_graph: builders.python_graph.build()?,
+            rust_graph: builders.rust_graph.build()?,
+            ts_graph: builders.ts_graph.build()?,
+        })
     }
 }

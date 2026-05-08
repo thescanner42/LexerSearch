@@ -9,6 +9,17 @@ Patterns are contained in yaml files. The top level keys are:
 - [name](#name)
 - [group](#group)
 
+## LexerSearchUI
+
+This guide's schema is for running LexerSearch directly. If running from the
+[web UI](https://thescanner42.github.io/LexerSearchUI/) it is slightly
+different:
+
+- the "languages" field is instead selected through a dropdown
+- the top level is a list of the schema described here instead of a single
+  element; this gives the same functionality as running LexerSearch with
+  multiple pattern files
+
 # Patterns
 
 LexerSearch patterns resemble the language being scanned. For example, `=` stated in a pattern will
@@ -32,15 +43,41 @@ something(0); // DIFFERENT
 
 ## Captures
 
-Captures come in one of three forms, only matching a single lexer token and only
-the appropriate type of lexer token:
+A capture is written with a dollar prefix (e.g. `$VAR`). It matches one
+capture-able lexer token, which is a:
 
-- `&IDENTIFIER`,     matching variables (e.g. `_my_variable_123`) or numbers (`[0-9]+`)
-- `$STRING_LITERAL`, e.g. `"hello world"`
+- number
+- identifier/keyword
+- or string literal
 
-The first time a capture is stated in a pattern is the creation of the capture.
-Subsequent mentions of that same capture act as a back-reference to the initial
-capture.
+The type of token that was captured can be determined from the first character
+of the captured token.
+
+- number -> `[0-9]+`
+- identifier/keyword -> `[a-zA-Z_][a-zA-Z0-9_]*`
+- string literal -> `".*"`
+
+The first time a capture with a new name is written in a pattern is the creation
+of that capture; the captured token is remebered and can be referred to later.
+Subsequent mentions of that same capture only allow the pattern to match if the
+capture content also matches. For pattern `$ABC $ABC`:
+
+```c
+SAME SAME      // YES
+SAME DIFFERENT // NO
+```
+
+Each capture populates information in the result. However, if a capture's name
+starts with "_" (e.g. `$_ABC`) then is it suppressed and does not populate the
+output.
+
+If the capture's name is exactly `$_` then this is a non-capturing capture - it
+accepts a capture-able token but does not remember it. Mentions of `$_` do not
+need their contents to match. For `$_ $_`:
+
+```c
+SAME DIFFERENT // YES
+```
 
 > [!WARNING]  
 > yaml interprets some characters in a special way, which may lead to unexpected
@@ -49,16 +86,9 @@ capture.
 > containing the value in `""` quotes or use `|` or `>` multi-line scalar
 > values.
 
-> [!IMPORTANT]  
-> Although `&ABC`, and `$ABC`, are unrelated captures, only the
-> capture's name ("ABC") populates the output. In these clashing cases, the last
-> capture will be the one that appears in the output. Try to avoid this case.
-
 > [!TIP]  
-> - A capture name prefixed by `_` is suppressed from the output but will still
->   be used by the [transform](#transform). e.g. `$_ABC`.
-> - The prefix character can be escaped via whitespace. e.g. `& ABC` matches the
->   literals `&` then `ABC`.
+> - The prefix character can be escaped via whitespace. e.g. `$ ABC` matches the
+>   literals `$` then `ABC`.
 > - Capture names should be short and UPPERCASE.
 
 ## Ellipsis Operators
@@ -108,9 +138,9 @@ in the parent lexical scope. It allows the "not too long" rule to apply to
 lexical curly brackets:
 
 ```
-let &VAR = &NUM;
+let $VAR = $NUM;
 ..}
-test(&VAR);
+test($VAR);
 ```
 
 ```rust
@@ -146,28 +176,31 @@ scanners. The following example detects when a variable is assigned to something
 which involves the number 5.
 
 ```
-&NUM = ..? 5 ..? ;
+$NUM = ..! 5 ..! ;
 ```
 
-The `..?` operator is very similar to the scope blocking ellipsis, but it will
-not exit the current statement. Its state is reset when reaching `...` or `..}`,
-(which are both intended to be used between statements).
+The `..!` operator is very similar to the scope blocking ellipsis: it will not escape the current lexical scope.
+
+However, it also will not exit the current statement: it cannot go past a ';' not in a nested lexical scope.
+
+Its state is reset when reaching `...` or `..}`, (which are both intended to be
+used between statements).
 
 ## Repetitions
 
 Looping is provided via the `..*` operator. For example:
 
 ```
-#[test]
-..* #[...] ..*
-fn &NAME(...) {...}
+#[test] // annotation
+..* #[...] ..* // other annotations like "#[should_panic]"
+..* pub ..*
+..* pub(...) ..*
+..* $_ ..* // various qualifiers like async, const, etc
+fn $_F(...) {...} // fn
 ```
 
-The section surround by `..*` is matched zero or more times. If a repitition
-section contains the creation of captures then those captures cannot be
-reference anywhere - they are forgotten when exiting the repitition section, and
-they cannot be backreferenced within the repitition section (it's instead
-treated as the creation of a different independent capture).
+The section surround by `..*` is matched zero or more times. Only non-capturing
+captures are allowed inside of a repitition section.
 
 ## Set Start
 
@@ -195,104 +228,6 @@ $ cargo run -- <PATTERNS_PATH> <SCAN_PATH> # DEFAULT
 $ LEXERSEARCH_EMBED_PATTERNS=<PATTERNS_PATH> cargo run --features=embed-patterns -- <SCAN_PATH>
 ```
 
-## Pattern Conflict
-
-When multiple LexerSearch patterns are run at the same time they can conflict
-with each other.
-
-LexerSearch is based off of a trie-like data structure. For example, the two patterns `a b` and `a c` are combined together like so:
-
-```mermaid
-%%{ init: { 'flowchart': {'defaultRenderer': 'elk' } } }%%
-flowchart LR
-    A([Start]) -- "a" --> B([ ])
-    B -- "b" --> C([" "])
-    B -- "c" --> D([" "])
-```
-
-Suppose a loop is introduced, `a ..+ a ..+ b` and `a c`. This constructs:
-
-```mermaid
-%%{ init: { 'flowchart': {'defaultRenderer': 'elk' } } }%%
-flowchart LR
-    A([Start]) -- "a" --> B([ ])
-    B -- "b" --> C([" "])
-    B -- "a" --> B
-    B -- "c" --> D([" "])
-```
-
-Since the structure is shared, input `a a c` can match despite not being
-match-able by each pattern individually.
-
-### Theory
-
-There are two ways of solving this problem. One way constructs the structure so
-that any loop forms its own branch - one follows the path that avoids the loop
-(uses it 0 times), and the other is formed when the loop is used (1 or more
-times). The above example would form:
-
-```mermaid
-%%{ init: { 'flowchart': {'defaultRenderer': 'elk' } } }%%
-flowchart LR
-    A([Start]) -- "a" --> B([ ])
-    B -- "c" --> C([" "])
-    B -- "b" --> D([" "])
-    B -- "a" --> E([" "])
-    E -- "a" --> E
-    E -- "b" --> F([" "])
-```
-
-The problem with this approach is that each loop in a pattern duplicates the
-number of branches needed to form the structure (2^n). This is untenable for
-longer patterns.
-
-The other solution uses the original structure but has each partial match store
-traversal information. When a loop is used, the partial match gets marked
-accordingly. At the possible full match, the partial match is only accepted if
-it used an appropriate traversal to get there. However this moves the problem to
-runtime, the number of partial matches would explode as the input is processed.
-
-Aside from managing pattern conflicts, detection is also not known to be possible in a reasonable time complexity while avoiding false positive and negatives.
-
-### Practice
-
-In practice, scanning source code is less ambiguous than these examples and
-there are ways of managing cases if they arise (which they should not).
-
-#### Repitition
-
-The repitition feature was created with a constrained use case in mind: function
-and method annotation in languages like java or rust. In these cases, there is
-always some preamble, and following that _very specific_ context, the repitition
-is used just to consume sections until the desired part is arrived at. Because
-repititions are used in specific context, there shouldn't ever be cases where
-they clash.
-
-```
-#[test] // annotation
-..* #[...] ..* // multiple times
-fn &_F(...) {...} // fn
-```
-
-#### Set Start
-
-Setting the start of a match via `..^` sets a flag on the transition in the
-structure. This is applied with a OR ASSIGN, so it could affect multiple
-patterns, e.g. `abc ..^ 123` and `abc 123`.
-
-The start should be set in a consistent way and it should happen at later parts
-of a pattern which are gated by sufficient context.
-
-#### Ellipsis Operators
-
-Pattern `vector< ..> >` searches for a vector declared with a template argument
-list. `vector< ... >` searches for "vector" literal, less than, some tokens,
-then greater than. Both patterns can't be used together since this gives
-ambiguity on which reflexive transition a partial match followed, and because
-this ambiguity is arrived at by the same pattern prefix. For the ellipsis
-operator there's generally only one correct choice (in this case, the former is
-likely what was intended).
-
 # Languages
 
 This field indicates what languages the patterns should apply to. For the
@@ -305,10 +240,10 @@ Most python-like rules should be written like this:
 ```yaml
 patterns: # EITHER OR
   - >
-    &VAR=&ABC
+    $VAR=$ABC
     ...
-    something(... kwar=&VAR ... )
-  - "&VAR=&ABC...something(... kwar=&VAR ... )"
+    something(... kwar=$VAR ... )
+  - "$VAR=$ABC...something(... kwar=$VAR ... )"
 languages:
   - py
 name: name
@@ -319,9 +254,9 @@ instead of this:
 ```yaml
 patterns: # BAD
   - |
-    &VAR=&ABC
+    $VAR=$ABC
     ...
-    something(... kwar=&VAR ... )
+    something(... kwar=$VAR ... )
 languages:
   - py
 name: name
@@ -338,7 +273,7 @@ capture's name (e.g. name "ABC" for capture "$ABC") with a
 [regex](https://docs.rs/regex-lite/latest/regex_lite/#syntax). If the capture's
 content does not match the expression then the match is discarded.
 
-If the regex matches "named capture groups" (like `(?<ALG>.+)`) then they will
+If the regex matches "named capture groups" (like `(?<MY_NAME>.+)`) then they will
 populate the output. If the named capture group's name matches the capture's
 name then the matched values must be equal to accept a match. In this example
 the match is accepted because both contain "x":
@@ -351,17 +286,16 @@ println!("{x}");
 ```yaml
 patterns:
   - >
-    &_VAR = $_STR;
+    $_VAR = $_STR;
     ..}
-    println!($_FMT)
+    println!($_EXPR)
 languages:
   - rust
 name: fmt_test_example
 out:
   literal_key: literal_value
 transform:
-  _FMT: ^\{(?<_VAR>[^}]+)}$
-
+  _EXPR: ^\"\{(?<_VAR>[^}]+)}\"$
 ```
 
 > [!IMPORTANT]  
@@ -380,11 +314,6 @@ output values which are otherwise not producible from the matched snippet.
 > [!IMPORTANT]  
 > `out` has the highest priority, and will overwrite captures if the keys clash.
 
-> [!TIP]  
-> By convention, if the captures contains "ignore": "true", then the entire
-> result should be discarded. When paired with groups (below), this subtly
-> allows for patterns which are not contained in other patterns.
-
 # Name
 
 The name field is used to identify which pattern a match is from. The
@@ -392,7 +321,7 @@ combination of the name and [group](#group) should be unique for each pattern.
 
 ```yaml
 patterns:
-  - $_STR # match any string
+  - $_ABC # my expression here
 name: my_reasonably_unique_name_here
 languages:
   - py
@@ -408,18 +337,19 @@ A pattern may opt in to grouping by stating a non empty group. Suppose the
 following code is being matched:
 
 ```java
-String v = "RSA";
-KeyPairGenerator kpg = KeyPairGenerator.getInstance(v);
-kpg.initialize(1024);
+String transportation_method = "bicycle";
+Tranport transport = TransportGenerator.create(transportation_method);
+transport.travel(100);
 ```
 
-A single pattern can match this whole sequence and extract the algorithm name
-and key size. However, any part of the sequence may be unavailable or not identified.
+A single pattern can match this whole sequence and extract the transportation
+method and travel distance. However, any part of the sequence may be unavailable
+or not identified.
 
 ```java
-String v = "RSA";
-KeyPairGenerator kpg = KeyPairGenerator.getInstance(v);
-kpg.initialize(Integer.parseInt("1024")); // not handled
+String transportation_method = "bicycle";
+Tranport transport = TransportGenerator.create(transportation_method);
+transport.travel(Integer.parseInt("1024")); // maybe not handled
 ```
 
 One workaround would be to state several different rules; one matches all the
@@ -434,35 +364,41 @@ use a group:
 ```yaml
 patterns: # "anchor" pattern
   - >
-    &_VAR = KeyPairGenerator.getInstance(&_ARG ...)
+    TransportGenerator.create(...)
 languages:
   - java
-group: java_key
+group:
+  name: travel_group
 name: anchor
 ```
 ```yaml
-patterns: # key size from anchor
+patterns: # distance from anchor
   - >
-    &_VAR = KeyPairGenerator.getInstance(&_ARG ...)
+    $_VAR = TransportGenerator.create(...)
     ..}
-    &_VAR.initialize(&KEY_SIZE)
+    $_VAR.travel($DISTANCE)
 languages:
   - java
-group: java_key
 transform:
-  KEY_SIZE: ^[0-9]
-name: unique_key_size
+  DISTANCE: ^[0-9]
+group:
+  name: travel_group
+  unique: true
+name: distance
 ```
 ```yaml
-patterns: # alg name from anchor
+patterns: # travel method from anchor
   - >
-    String &_VAR = $ALG;
+    String $_VAR = $_EXP;
     ..}
-    KeyPairGenerator.getInstance(&_VAR ...)
+    TransportGenerator.create($_VAR ...)
 languages:
   - java
-name: alg
-group: java_key
+name: method
+transform:
+  _EXP: "^\"(?<METHOD>.*)\"$"
+group:
+  name: travel_group
 ```
 
 The above rules together produce a single match:
@@ -470,30 +406,34 @@ The above rules together produce a single match:
 ```yaml
 {
     ...
-    "name": "java_key",
+    "name": "travel_group",
     "captures": {
-        "ALG": "RSA",
-        "KEY_SIZE": "1024"
+        "DISTANCE": "100",
+        "METHOD": "bicycle"
     }
 }
 ```
 
 The matches are merged into the same finding when:
-- the user stated group is the same
+- the user stated group name is the same
 - between the incoming match and the intersection of the matches already in the
   finding, the span of one must cover the other
 
 This on its own is not enough to prevent merging of unrelated matches, as there
-could be overlapping matches with patterns of unrelated variables. If the name
-of a capture starts with "SAME" or "_SAME" then the capture name and value must
-match in the finding for them to be merged.
+could be overlapping matches with patterns of unrelated variables. `group.match`
+is a list of variables names whose captured content must match for the findings
+to be merged.
 
 By default, if a match being merged has the same name as an existing match, then
 the new match replaces the old match, and the old match is discarded. This
-better models cases like variable redeclaration / shadowing. However, if the
-rule starts with "unique", then this instead forks the finding - both are sent
-to the output.
+better models cases like variable redeclaration / shadowing. However, if
+`group.unique` is true, then this instead forks the finding - both are sent to
+the output.
+
+Lastly, a match can be cancelled by setting `group.cancel` to true; when merging
+with other matches it causes the result to be discarded. This allows, for
+example, detection of a pattern not contained in a different pattern.
 
 # Examples
 
-See the [examples](./examples/) folder for more details!
+See the [examples](./examples/README.md) folder for more details!

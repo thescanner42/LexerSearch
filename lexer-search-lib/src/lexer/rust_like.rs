@@ -1,8 +1,7 @@
 use std::num::NonZero;
 
 use crate::lexer::{
-    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType,
-    calc_start_offset,
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, calc_start_offset,
 };
 
 use super::utf8_multibyte_part;
@@ -122,7 +121,7 @@ enum LexerEnum {
     /// used when unwinding something which could have been an ellipsis
     EmitDot,
     /// a capture, like $str #num &ident. double to escape
-    Capture((usize, CaptureType)),
+    Capture(usize),
 }
 
 fn ret_token<'state>(me: &'state Lexer, var: LexerTokenVariant<'state>) -> LexerToken<'state> {
@@ -188,9 +187,7 @@ impl super::Lexer for Lexer {
                         } else if byte == b'.' && self.pattern_enabled {
                             self.state = LexerEnum::EllipsisDot;
                         } else if byte == b'$' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture((1, CaptureType::Dollar));
-                        } else if byte == b'&' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture((1, CaptureType::Ampersand));
+                            self.state = LexerEnum::Capture(1);
                         } else {
                             return Ok(Some(ret_token(self, LexerTokenVariant::Byte(byte))));
                         }
@@ -290,24 +287,18 @@ impl super::Lexer for Lexer {
                             }
                         }
                     }
-                    LexerEnum::Capture((len, capture_type)) => {
+                    LexerEnum::Capture(len) => {
                         if byte.is_ascii_alphabetic()
                             || byte == b'_'
                             || utf8_multibyte_part(byte)
                             || byte.is_ascii_digit()
                         {
-                            self.state = LexerEnum::Capture((len + 1, capture_type));
+                            self.state = LexerEnum::Capture(len + 1);
                         } else {
                             self.state = LexerEnum::Start;
                             self.back_one_byte();
                             if len == 1 {
-                                return Ok(Some(ret_token(
-                                    self,
-                                    LexerTokenVariant::Byte(match capture_type {
-                                        CaptureType::Ampersand => b'&',
-                                        CaptureType::Dollar => b'$',
-                                    }),
-                                )));
+                                return Ok(Some(ret_token(self, LexerTokenVariant::Byte(b'$'))));
                             }
                             if len <= self.max_token_length.get() {
                                 let end_position = self.buffer_start_offset;
@@ -420,7 +411,7 @@ impl super::Lexer for Lexer {
                         if byte == b'.'
                             || byte == b'>'
                             || byte == b'}'
-                            || byte == b'?'
+                            || byte == b'!'
                             || byte == b'*'
                             || byte == b'^'
                         {
@@ -429,7 +420,7 @@ impl super::Lexer for Lexer {
                                 b'.' => EllipsisEnum::Normal,
                                 b'>' => EllipsisEnum::CBE,
                                 b'}' => EllipsisEnum::SBE(false),
-                                b'?' => EllipsisEnum::SBE(true),
+                                b'!' => EllipsisEnum::SBE(true),
                                 b'*' => EllipsisEnum::Jump,
                                 b'^' => EllipsisEnum::SetStart,
                                 _ => unreachable!(),
@@ -437,7 +428,7 @@ impl super::Lexer for Lexer {
                             return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis(t))));
                         } else {
                             //    V
-                            // ..?
+                            // ..!
                             self.back_one_byte();
                             self.state = LexerEnum::EmitDot;
                             let mut out = ret_token(self, LexerTokenVariant::Byte(b'.'));
@@ -461,7 +452,7 @@ impl super::Lexer for Lexer {
             let num_bytes_to_remove = self.buffer_start_offset
                 - match self.state {
                     LexerEnum::Identifier(len)
-                    | LexerEnum::Capture((len, _))
+                    | LexerEnum::Capture(len)
                     | LexerEnum::Number(len)
                     | LexerEnum::SingleQuoteString(len)
                     | LexerEnum::DoubleQuoteString(len, ..) => {
@@ -520,7 +511,7 @@ impl super::Lexer for Lexer {
                     Some(LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)))
                 }
             }
-            LexerEnum::Capture((len, _capture_type)) => {
+            LexerEnum::Capture(len) => {
                 if len <= self.max_token_length.get() {
                     let end_position = self.buffer_start_offset;
                     let start_position = end_position - len;

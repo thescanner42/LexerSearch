@@ -1,9 +1,12 @@
 # example purposes - not comprehensive
 patterns:
 - |-
-  &_SAME_V = malloc(...);
+  $_VAR = malloc(...);
 name: ''
-group: malloc_no_free
+group:
+  name: malloc_no_free
+  match:
+    - _VAR
 languages:
   - c
 transform: {}

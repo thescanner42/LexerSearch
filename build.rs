@@ -1,7 +1,7 @@
 use std::{fs::OpenOptions, num::NonZeroUsize, path::PathBuf, process::Command};
 
 use chrono::{TimeZone, Utc};
-use lexer_search_lib::engine::matchers::Tries;
+use lexer_search_lib::engine::matchers::Graphs;
 
 fn main() -> Result<(), String> {
     let cargo_version = env!("CARGO_PKG_VERSION");
@@ -45,7 +45,7 @@ fn main() -> Result<(), String> {
         Err(_) => lexer_search_lib::lexer::DEFAULT_MAX_TOKEN_LENGTH,
     };
 
-    let tries = Tries::construct_tries(std::path::Path::new(&patterns_path), max_token_length)?;
+    let tries = Graphs::construct_graphs(std::path::Path::new(&patterns_path), max_token_length)?;
 
     let mut path = PathBuf::new();
     path.push("target");
@@ -58,9 +58,8 @@ fn main() -> Result<(), String> {
         .open(path)
         .map_err(|e| e.to_string())?;
 
-    let _size =
-        bincode::serde::encode_into_std_write(&tries, &mut file, bincode::config::standard())
-            .map_err(|e| e.to_string())?;
+    let _size = bincode::encode_into_std_write(&tries, &mut file, bincode::config::standard())
+        .map_err(|e| e.to_string())?;
 
     println!("cargo:rerun-if-changed={}", patterns_path);
     Ok(())

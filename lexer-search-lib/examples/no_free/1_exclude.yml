@@ -1,12 +1,14 @@
 patterns:
 - |-
-  &_SAME_V = malloc(...);
+  $_VAR = malloc(...);
   ..}
-  free(&_SAME_V);
+  free($_VAR);
 name: exclude
-group: malloc_no_free
+group:
+  name: malloc_no_free
+  match:
+    - _VAR
+  cancel: true
 languages:
   - c
-out:
-  ignore: 'true'
 transform: {}
