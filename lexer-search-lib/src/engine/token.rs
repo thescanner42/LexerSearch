@@ -100,6 +100,8 @@ pub enum RepititionTokenVariant {
 
     NonCapturingCapture,
     Backref(usize),
+    CreateCapture,
+    BackrefReplace(usize),
 }
 
 impl RepititionTokenVariant {
@@ -139,6 +141,11 @@ impl RepititionTokenVariant {
                 out.push(12);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             }
+            RepititionTokenVariant::CreateCapture => out.push(13),
+            RepititionTokenVariant::BackrefReplace(v) => {
+                out.push(14);
+                out.extend_from_slice(&(*v as u32).to_le_bytes());
+            },
         }
 
         out

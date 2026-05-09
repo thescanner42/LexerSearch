@@ -146,7 +146,7 @@ pub enum LexerTokenVariant<'a> {
     LexicalLevelChange(i32, MaybeSliceRef<'a>),
     /// only emitted when the lexer is set to process a pattern
     Ellipsis(EllipsisEnum),
-    /// $VAR. contains the "$" prefix
+    /// $VAR or &VAR
     ///
     /// only emitted when the lexer is set to process a pattern
     Capture(MaybeSliceRef<'a>),

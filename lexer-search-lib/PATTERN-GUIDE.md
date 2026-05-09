@@ -60,7 +60,8 @@ of the captured token.
 The first time a capture with a new name is written in a pattern is the creation
 of that capture; the captured token is remebered and can be referred to later.
 Subsequent mentions of that same capture only allow the pattern to match if the
-capture content also matches. For pattern `$ABC $ABC`:
+capture content also matches. For pattern `$ABC $ABC` the first is the capture
+creation and the second is a backreference to the created capture `ABC`:
 
 ```c
 SAME SAME      // YES
@@ -199,8 +200,38 @@ Looping is provided via the `..*` operator. For example:
 fn $_F(...) {...} // fn
 ```
 
-The section surround by `..*` is matched zero or more times. Only non-capturing
-captures are allowed inside of a repitition section.
+The section surround by `..*` is matched zero or more times.
+
+The total number of captures created in a repitition section must equal zero.
+
+For example, the non-capture `$_` can be stated any number of times since it
+does not create a capture. Similarly backreferencing to an existing capture also
+does not create captures.
+
+### Backreference Replace
+
+Inside a repitition section a backreference replace can be used. For example:
+
+```
+$X = ..! source ..! ;
+                 // VV HERE
+..* ..} $NEWX = ..! %X ..! ; ..*
+..}
+sink($X)
+```
+
+It is written with an percent prefix like `%ABC`. It must backreference an
+existing capture.
+
+If the backreference is valid (because the contents match), it replaces the
+contents of the capture of the same name with the last capture that was created.
+In the above example, it backreference to `$X` and once it matches it takes
+`$NEWX` and stores it into `$X`. Since `$NEWX` was taken, if it is mentioned
+again it will instead create a capture - it's as if it was never created in the
+first place.
+
+The above example repitition creates a capture and then pops that same capture,
+meaning a net change of zero.
 
 ## Set Start
 
@@ -217,6 +248,9 @@ import abc
 # match span starts at 'abc' and not the 'import' above
 abc.something(123)
 ```
+
+The `..^` operator should only be placed before non-reflexive transitions. e.g.
+not `..^ ...`.
 
 ## Embed Patterns
 

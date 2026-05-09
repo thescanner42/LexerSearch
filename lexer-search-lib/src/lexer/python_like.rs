@@ -3,7 +3,7 @@ use std::num::NonZero;
 use super::c_like::{QuoteType, StringEscaped};
 
 use crate::lexer::{
-    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, calc_start_offset,
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset
 };
 
 use super::utf8_multibyte_part;
@@ -182,8 +182,8 @@ enum LexerEnum {
     EllipsisDotDot,
     /// used when unwinding something which could have been an ellipsis
     EmitDot,
-    /// a capture, $ident. whitespace to escape
-    Capture(usize),
+    /// a capture, like $abc &123. whitespace to escape
+    Capture((usize, CaptureType)),
 }
 
 impl LexerEnum {
@@ -236,7 +236,9 @@ impl super::Lexer for Lexer {
                         } else if byte == b'.' && self.pattern_enabled {
                             self.state = LexerEnum::EllipsisDot;
                         } else if byte == b'$' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture(1);
+                            self.state = LexerEnum::Capture((1, CaptureType::Dollar));
+                        } else if byte == b'%' && self.pattern_enabled {
+                            self.state = LexerEnum::Capture((1, CaptureType::Percent));
                         } else {
                             if byte == b'(' {
                                 self.round_bracket_lock += 1;
@@ -356,18 +358,31 @@ impl super::Lexer for Lexer {
                             }
                         }
                     }
-                    LexerEnum::Capture(len) => {
+                    LexerEnum::Capture((len, capture_type)) => {
                         if byte.is_ascii_alphabetic()
                             || byte == b'_'
                             || utf8_multibyte_part(byte)
                             || byte.is_ascii_digit()
                         {
-                            self.state = LexerEnum::Capture(len + 1);
+                            self.state = LexerEnum::Capture((len + 1, capture_type));
                         } else {
                             self.state = LexerEnum::NotLineStart;
                             self.back_one_byte();
                             if len == 1 {
-                                return Ok(Some(ret_token(self, LexerTokenVariant::Byte(b'$'))));
+                                match capture_type {
+                                    CaptureType::Percent => {
+                                        return Ok(Some(ret_token(
+                                            self,
+                                            LexerTokenVariant::Byte(b'$'),
+                                        )));
+                                    }
+                                    CaptureType::Dollar => {
+                                        return Ok(Some(ret_token(
+                                            self,
+                                            LexerTokenVariant::Byte(b'$'),
+                                        )));
+                                    }
+                                }
                             }
                             if len <= self.max_token_length.get() {
                                 let end_position = self.buffer_start_offset;
@@ -638,7 +653,7 @@ impl super::Lexer for Lexer {
                 - match self.state {
                     LexerEnum::Indentation(LexerEnumIndentation { amount: _, len })
                     | LexerEnum::Identifier(len)
-                    | LexerEnum::Capture(len)
+                    | LexerEnum::Capture((len, _))
                     | LexerEnum::Number(len)
                     | LexerEnum::String(len, ..)
                     | LexerEnum::SingleQuoteBlockString(len)
@@ -719,7 +734,7 @@ impl super::Lexer for Lexer {
                     Some(LexerTokenVariant::String(MaybeSliceRef::Len(2), 1))
                 }
             }
-            LexerEnum::Capture(len) => {
+            LexerEnum::Capture((len, _)) => {
                 if len <= self.max_token_length.get() {
                     let end_position = self.buffer_start_offset;
                     let start_position = end_position - len;

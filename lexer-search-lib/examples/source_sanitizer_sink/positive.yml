@@ -1,0 +1,13 @@
+patterns:
+- |-
+  $X = ..! source ..! ;
+  ..* ..} $NEWX = ..! %X ..! ; ..*
+  ..}
+  sink($X)
+name: positive
+group:
+  match:
+    - X
+  name: source_sanitizer_sink
+languages:
+  - rust

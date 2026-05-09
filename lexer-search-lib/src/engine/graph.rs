@@ -210,6 +210,7 @@ pub enum GraphTokenVariant {
     LexicalLevelChange(i32),
     /// index N on capture stack was matched
     Backref(usize),
+    BackrefReplace(usize),
 }
 
 // lossy display for --debug-graph
@@ -243,6 +244,7 @@ impl fmt::Display for GraphTokenVariant {
             }
             GraphTokenVariant::LexicalLevelChange(v) => write!(f, "l:{v}"),
             GraphTokenVariant::Backref(n) => write!(f, "r:{n}"),
+            GraphTokenVariant::BackrefReplace(n) => write!(f, "rr:{n}"),
         }
     }
 }
@@ -314,7 +316,9 @@ impl GraphBuilder {
         let mut bracket_stack: BracketStack = Default::default();
         let mut canonicalizer = Canonicalizer::new(max_token_length);
         let mut graph_position = 0usize;
-        let mut current_repitition: Option<Repitition> = None;
+        // the current reptitition and the captures that were created in the
+        // repitition
+        let mut current_repitition: Option<(Repitition, Vec<Box<[u8]>>)> = None;
         let mut set_start = false;
 
         // keep track of first time seeing capture vs backreference
@@ -339,7 +343,7 @@ impl GraphBuilder {
                         let mut reversed: Vec<BackrefInfo> = Vec::with_capacity(len);
                         reversed.resize_with(len, || Default::default());
                         for (key, index) in captures {
-                            reversed[index].name = key[1..].to_vec().into_boxed_slice();
+                            reversed[index].name = key.to_vec().into_boxed_slice();
 
                             let r: &Box<[u8]> = &reversed[index].name;
                             if let Some(expr) = transform.get(r) {
@@ -391,8 +395,14 @@ impl GraphBuilder {
             if matches!(token.variant, TokenVariant::Ellipsis(EllipsisEnum::Jump)) {
                 // start or stop of a repitition
                 match current_repitition.take() {
-                    Some(v) => {
+                    Some((v, new_captures)) => {
                         // end of ..*, the loop is fully known at this point
+                        if !new_captures.is_empty() {
+                            return Err(
+                                "a repitition must have a sum of zero captures created".to_string()
+                            );
+                        }
+
                         match self.nodes[graph_position].repitition.entry(v) {
                             std::collections::hash_map::Entry::Occupied(occupied_entry) => {
                                 graph_position = *occupied_entry.get(); // follow existing
@@ -410,12 +420,12 @@ impl GraphBuilder {
                         if std::mem::take(&mut set_start) {
                             r.push(RepititionTokenVariant::SetStart);
                         }
-                        current_repitition = Some(Default::default());
+                        current_repitition = Some((Default::default(), Default::default()));
                     }
                 }
                 continue;
             } else {
-                if let Some(repitition) = current_repitition.as_mut() {
+                if let Some((repitition, new_captures)) = current_repitition.as_mut() {
                     repitition.push(match token.variant {
                         // convert token variant to reptition token variant
                         TokenVariant::OverlongIdentifier
@@ -451,13 +461,41 @@ impl GraphBuilder {
                             EllipsisEnum::SetStart => RepititionTokenVariant::SetStart,
                         },
                         TokenVariant::Capture(items) => {
-                            if let Some(v) = captures.get(&items) {
-                                RepititionTokenVariant::Backref(*v)
-                            } else {
-                                if *items != *b"$_" {
-                                    return Err("can't create capture in repitition".to_string());
+                            match items[0] {
+                                b'$' => {
+                                    // normal capture
+                                    if *items == *b"$_" {
+                                        // non-capture
+                                        RepititionTokenVariant::NonCapturingCapture
+                                    } else {
+                                        if let Some(v) = captures.get(&items[1..]) {
+                                            // backref normal capture
+                                            RepititionTokenVariant::Backref(*v)
+                                        } else {
+                                            // create capture
+                                            new_captures.push(Box::<[_]>::from(&items[1..]));
+                                            captures.insert(items[1..].into(), capture_count_increment);
+                                            capture_count_increment += 1;
+                                            RepititionTokenVariant::CreateCapture
+                                        }
+                                    }
                                 }
-                                RepititionTokenVariant::NonCapturingCapture
+                                b'%' => {
+                                    // replace capture
+                                    match new_captures.pop() {
+                                        Some(new_capture) => {
+                                            captures.remove(&new_capture).unwrap();
+                                            capture_count_increment -= 1;
+                                            if let Some(v) = captures.get(&items[1..]) {
+                                                RepititionTokenVariant::BackrefReplace(*v)
+                                            } else {
+                                                return Err("backref replace must reference an existing capture".to_string());
+                                            }
+                                        }
+                                        None => return Err("expecting prior capture in repitition".to_string()),
+                                    }
+                                }
+                                _ => unreachable!(),
                             }
                         }
                     });
@@ -726,14 +764,19 @@ impl GraphBuilder {
                                 }
                                 continue;
                             } else {
-                                match captures.get(&items) {
+                                if items[0] != b'$' {
+                                    return Err(
+                                        "backref replace only allowed in repitition".to_string()
+                                    );
+                                }
+                                match captures.get(&items[1..]) {
                                     Some(ref_num) => {
                                         // capture was stated previously, this is a
                                         // backreference
                                         GraphTokenVariant::Backref(*ref_num)
                                     }
                                     None => {
-                                        captures.insert(items.into(), capture_count_increment);
+                                        captures.insert(items[1..].into(), capture_count_increment);
                                         capture_count_increment += 1;
                                         match self.nodes[graph_position].create_capture.as_ref() {
                                             Some(v) => match v {
@@ -1292,11 +1335,30 @@ impl GraphBuilder {
                     };
                     for (i, node) in repitition.iter().enumerate() {
                         let last_node_in_loop = is_loop && i == repitition.len() - 1;
+
+                        if last_node_in_loop {
+                            match node {
+                                RepititionTokenVariant::Uncontained
+                                | RepititionTokenVariant::Corner
+                                | RepititionTokenVariant::Round
+                                | RepititionTokenVariant::Square
+                                | RepititionTokenVariant::Curly
+                                | RepititionTokenVariant::ScopeBlocking
+                                | RepititionTokenVariant::StatementBlocking => {
+                                    // TODO there's not a strong need to do this
+                                    // change but can be revisited
+                                    return Err("repitition can't end with reflexive transition (e.g. ...). instead write an equivalent pattern where the reflexive transition is at the beginning of the repitition and not the end".to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+
                         match node {
                             RepititionTokenVariant::Captureable(_)
                             | RepititionTokenVariant::Byte(_)
                             | RepititionTokenVariant::LexicalLevelChange(_)
-                            | RepititionTokenVariant::Backref(_) => {
+                            | RepititionTokenVariant::Backref(_)
+                            | RepititionTokenVariant::BackrefReplace(_) => {
                                 let out_dst = if last_node_in_loop {
                                     loop_back_index.unwrap()
                                 } else {
@@ -1315,6 +1377,9 @@ impl GraphBuilder {
                                     }
                                     RepititionTokenVariant::Backref(n) => {
                                         GraphTokenVariant::Backref(n)
+                                    }
+                                    RepititionTokenVariant::BackrefReplace(n) => {
+                                        GraphTokenVariant::BackrefReplace(n)
                                     }
                                     _ => unreachable!(),
                                 };
@@ -1443,6 +1508,20 @@ impl GraphBuilder {
                                 };
 
                                 ret[repitition_current_position].non_capture.push(
+                                    SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                );
+                                repitition_current_position = out_dst;
+                            }
+                            RepititionTokenVariant::CreateCapture => {
+                                let out_dst = if last_node_in_loop {
+                                    loop_back_index.unwrap()
+                                } else {
+                                    let r = ret.len();
+                                    ret.push(Default::default());
+                                    r
+                                };
+
+                                ret[repitition_current_position].create_capture.push(
                                     SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
                                 );
                                 repitition_current_position = out_dst;

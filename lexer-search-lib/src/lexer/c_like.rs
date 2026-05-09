@@ -85,6 +85,12 @@ pub(super) enum QuoteType {
     BackTickQuote,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CaptureType {
+    Percent,
+    Dollar,
+}
+
 /// has the escape character '\' been seen previously
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StringEscaped {
@@ -126,8 +132,8 @@ enum LexerEnum {
     EllipsisDotDot,
     /// used when unwinding something which could have been an ellipsis
     EmitDot,
-    /// a capture, like $SOMETHING. use whitespace to escape
-    Capture(usize),
+    /// a capture, like $abc &anc. use whitespace to escape
+    Capture((usize, CaptureType)),
 }
 
 fn ret_token<'state>(me: &'state Lexer, var: LexerTokenVariant<'state>) -> LexerToken<'state> {
@@ -199,7 +205,9 @@ impl super::Lexer for Lexer {
                         } else if byte == b'.' && self.pattern_enabled {
                             self.state = LexerEnum::EllipsisDot;
                         } else if byte == b'$' && self.pattern_enabled {
-                            self.state = LexerEnum::Capture(1);
+                            self.state = LexerEnum::Capture((1, CaptureType::Dollar));
+                        } else if byte == b'%' && self.pattern_enabled {
+                            self.state = LexerEnum::Capture((1, CaptureType::Percent));
                         } else {
                             return Ok(Some(ret_token(self, LexerTokenVariant::Byte(byte))));
                         }
@@ -242,18 +250,24 @@ impl super::Lexer for Lexer {
                             }
                         }
                     }
-                    LexerEnum::Capture(len) => {
+                    LexerEnum::Capture((len, capture_type)) => {
                         if byte.is_ascii_alphabetic()
                             || byte == b'_'
                             || utf8_multibyte_part(byte)
                             || byte.is_ascii_digit()
                         {
-                            self.state = LexerEnum::Capture(len + 1);
+                            self.state = LexerEnum::Capture((len + 1, capture_type));
                         } else {
                             self.state = LexerEnum::Start;
                             self.back_one_byte();
                             if len == 1 {
-                                return Ok(Some(ret_token(self, LexerTokenVariant::Byte(b'$'))));
+                                return Ok(Some(ret_token(
+                                    self,
+                                    LexerTokenVariant::Byte(match capture_type {
+                                        CaptureType::Percent => b'%',
+                                        CaptureType::Dollar => b'$',
+                                    }),
+                                )));
                             }
                             if len <= self.max_token_length.get() {
                                 let end_position = self.buffer_start_offset;
@@ -410,7 +424,7 @@ impl super::Lexer for Lexer {
             // make room for the new bytes to be read
             let num_bytes_to_remove = self.buffer_start_offset
                 - match self.state {
-                    LexerEnum::Capture(len)
+                    LexerEnum::Capture((len, _))
                     | LexerEnum::Identifier(len)
                     | LexerEnum::Number(len)
                     | LexerEnum::String(len, ..) => {
@@ -467,7 +481,7 @@ impl super::Lexer for Lexer {
                     Some(LexerTokenVariant::Identifier(MaybeSliceRef::Len(len)))
                 }
             }
-            LexerEnum::Capture(len) => {
+            LexerEnum::Capture((len, _capture_type)) => {
                 if len <= self.max_token_length.get() {
                     let end_position = self.buffer_start_offset;
                     let start_position = end_position - len;
@@ -727,13 +741,13 @@ mod tests {
 
     #[test]
     fn whitespace_escape() {
-        let s = b"& ABC ";
+        let s = b"% ABC ";
         let mut c = Cursor::new(s);
         let mut lexer = lexer_for_test();
 
         let tok = lexer.next(&mut c).unwrap().unwrap();
         assert_eq!(tok.start.offset, 0);
-        assert_eq!(tok.variant, LexerTokenVariant::Byte(b'&'));
+        assert_eq!(tok.variant, LexerTokenVariant::Byte(b'%'));
 
         let tok = lexer.next(&mut c).unwrap().unwrap();
         assert_eq!(tok.start.offset, 2);

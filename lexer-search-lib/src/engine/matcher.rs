@@ -452,6 +452,40 @@ impl<'g> Matcher<'g> {
                                     });
                                 }
                             }
+
+                            if let Some(v) = graph.nodes[current.trie_position]
+                                .edge
+                                .get(&GraphTokenVariant::BackrefReplace(i))
+                            {
+                                for v in v.iter() {
+                                    v.handle(|v, set_start| {
+                                        // replace content at position
+                                        let mut new_stack = (*current.capture_stack).clone();
+                                        let last = new_stack.pop().unwrap();
+                                        new_stack[i] = last;
+                                        let new_stack = Arc::new(new_stack);
+                                        let m = PartialMatch {
+                                            start_position: if set_start {
+                                                input.start
+                                            } else {
+                                                current.start_position
+                                            },
+                                            priority_position: current.priority_position,
+                                            trie_position: v,
+                                            capture_stack: new_stack,
+                                            bracket_state: current
+                                                .bracket_state
+                                                .pass_through_scope_blocking(),
+                                        };
+                                        handle_maybe_full_match(exprs, graph, &m, &input, out);
+                                        handle_partial_match(
+                                            next_matches,
+                                            max_concurrent_matches,
+                                            m,
+                                        );
+                                    });
+                                }
+                            }
                         }
                     }
                 }

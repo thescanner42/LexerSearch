@@ -1,0 +1,9 @@
+patterns:
+- |-
+  $X = ..! source ..! ;
+  ..* ..} $NEWX = ..! %X ..! ; ..*
+  ..}
+  sink($X)
+name: source_sink
+languages:
+  - rust
