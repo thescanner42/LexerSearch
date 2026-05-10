@@ -80,13 +80,6 @@ need their contents to match. For `$_ $_`:
 SAME DIFFERENT // YES
 ```
 
-> [!WARNING]  
-> yaml interprets some characters in a special way, which may lead to unexpected
-> results. For example, yaml anchors use the characters `&` and `*`. This
-> usually is highlighted in your editor of choice, but when in doubt, consider
-> containing the value in `""` quotes or use `|` or `>` multi-line scalar
-> values.
-
 > [!TIP]  
 > - The prefix character can be escaped via whitespace. e.g. `$ ABC` matches the
 >   literals `$` then `ABC`.
@@ -106,6 +99,11 @@ the closing of a template argument list in languages like Rust or C++, e.g.
 ambiguity, like: `vector< ..> >`. The `..>` is the corner bracket ellipsis. This
 indicates that the ellipsis operator is contained inside corner brackets. It is
 deduced for other types of brackets.
+
+
+> [!WARNING]  
+> avoid adjacent reflexive transitions like `... ...` as this can create an
+> excessive number of partial matches.
 
 ### Not Too Short
 
@@ -214,9 +212,9 @@ Inside a repitition section a backreference replace can be used. For example:
 
 ```
 $X = ..! source ..! ;
-                 // VV HERE
-..* ..} $NEWX = ..! %X ..! ; ..*
 ..}
+             // VV HERE
+..* $NEWX = ..! %X ..! ; ..} ..*
 sink($X)
 ```
 

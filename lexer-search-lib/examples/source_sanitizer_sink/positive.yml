@@ -1,8 +1,8 @@
 patterns:
 - |-
   $X = ..! source ..! ;
-  ..* ..} $NEWX = ..! %X ..! ; ..*
   ..}
+  ..* $NEWX = ..! %X ..! ; ..} ..*
   sink($X)
 name: positive
 group:

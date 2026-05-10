@@ -944,6 +944,68 @@ impl GraphBuilder {
         Ok(())
     }
 
+    fn redirect_transitions(g: &mut GraphNode, src: usize, dst: usize) {
+        fn rewrite_vec(v: &mut [usize], src: usize, dst: usize) {
+            for item in v {
+                if *item == src {
+                    *item = dst;
+                }
+            }
+        }
+
+        fn rewrite_setstart_enum_vec(v: &mut [SetStartEnum], src: usize, dst: usize) {
+            for item in v {
+                rewrite_setstart(item, src, dst);
+            }
+        }
+
+        fn rewrite_setstart(t: &mut SetStartEnum, src: usize, dst: usize) {
+            match t {
+                SetStartEnum::No(v) => {
+                    if *v == src {
+                        *v = dst;
+                    }
+                }
+                SetStartEnum::Yes(v) => {
+                    if *v == src {
+                        *v = dst;
+                    }
+                }
+                SetStartEnum::Both(no, yes) => {
+                    if *no == src {
+                        *no = dst;
+                    }
+
+                    if *yes == src {
+                        *yes = dst;
+                    }
+                }
+            }
+        }
+
+        for targets in g.edge.values_mut() {
+            rewrite_setstart_enum_vec(targets, src, dst);
+        }
+
+        match &mut g.ellipsis {
+            GraphNodeEllipsisEnum::None => {}
+
+            GraphNodeEllipsisEnum::Round(v)
+            | GraphNodeEllipsisEnum::Square(v)
+            | GraphNodeEllipsisEnum::Curly(v) => {
+                rewrite_vec(v, src, dst);
+            }
+
+            GraphNodeEllipsisEnum::UncontainedAndCorner(v1, v2) => {
+                rewrite_vec(v1, src, dst);
+                rewrite_vec(v2, src, dst);
+            }
+        }
+
+        rewrite_setstart_enum_vec(&mut g.create_capture, src, dst);
+        rewrite_setstart_enum_vec(&mut g.non_capture, src, dst);
+    }
+
     fn build_subroutine(
         &mut self,
         in_position: usize,
@@ -1336,7 +1398,7 @@ impl GraphBuilder {
                     for (i, node) in repitition.iter().enumerate() {
                         let last_node_in_loop = is_loop && i == repitition.len() - 1;
 
-                        if last_node_in_loop {
+                        if repitition_current_position == ret_current_position {
                             match node {
                                 RepititionTokenVariant::Uncontained
                                 | RepititionTokenVariant::Corner
@@ -1345,9 +1407,12 @@ impl GraphBuilder {
                                 | RepititionTokenVariant::Curly
                                 | RepititionTokenVariant::ScopeBlocking
                                 | RepititionTokenVariant::StatementBlocking => {
-                                    // TODO there's not a strong need to do this
-                                    // change but can be revisited
-                                    return Err("repitition can't end with reflexive transition (e.g. ...). instead write an equivalent pattern where the reflexive transition is at the beginning of the repitition and not the end".to_string());
+                                    // TODO there isn't a strong reason for this
+                                    // - simplifies implementation and there's
+                                    // always a different way of writing the
+                                    // pattern (reflexive at end instead of at
+                                    // beginning)
+                                    return Err("repitition requires content before reflexive transition (e.g. ...)".to_string());
                                 }
                                 _ => {}
                             }
@@ -1392,108 +1457,202 @@ impl GraphBuilder {
                                 repitition_current_position = out_dst;
                             }
                             RepititionTokenVariant::Uncontained => {
-                                // since each unique repitition is independent there is
-                                // no need to separate the 0 and 1 or more cases
-                                //
-                                // simply add the loop at the current node
-                                match &mut ret[repitition_current_position].ellipsis {
-                                    GraphNodeEllipsisEnum::None => {
-                                        ret[repitition_current_position].ellipsis =
-                                            GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                                vec![repitition_current_position],
-                                                vec![],
-                                            );
-                                    }
-                                    GraphNodeEllipsisEnum::UncontainedAndCorner(un_items, _) => {
-                                        un_items.push(repitition_current_position);
-                                    }
-                                    _ => {
-                                        // never
-                                        return Err("... clashing in builder".to_string());
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    // since each unique repitition is independent there is
+                                    // no need to separate the 0 and 1 or more cases
+                                    //
+                                    // simply add the loop at the current node
+                                    match &mut ret[repitition_current_position].ellipsis {
+                                        GraphNodeEllipsisEnum::None => {
+                                            ret[repitition_current_position].ellipsis =
+                                                GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                                    vec![repitition_current_position],
+                                                    vec![],
+                                                );
+                                        }
+                                        GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                            un_items,
+                                            _,
+                                        ) => {
+                                            un_items.push(repitition_current_position);
+                                        }
+                                        _ => {
+                                            // never
+                                            return Err("... clashing in builder".to_string());
+                                        }
                                     }
                                 }
                             }
                             RepititionTokenVariant::Corner => {
-                                match &mut ret[repitition_current_position].ellipsis {
-                                    GraphNodeEllipsisEnum::None => {
-                                        ret[repitition_current_position].ellipsis =
-                                            GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                                vec![],
-                                                vec![repitition_current_position],
-                                            );
-                                    }
-                                    GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                        _,
-                                        corner_items,
-                                    ) => {
-                                        corner_items.push(repitition_current_position);
-                                    }
-                                    _ => {
-                                        // never
-                                        return Err("..> clashing in builder".to_string());
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    match &mut ret[repitition_current_position].ellipsis {
+                                        GraphNodeEllipsisEnum::None => {
+                                            ret[repitition_current_position].ellipsis =
+                                                GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                                    vec![],
+                                                    vec![repitition_current_position],
+                                                );
+                                        }
+                                        GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                            _,
+                                            corner_items,
+                                        ) => {
+                                            corner_items.push(repitition_current_position);
+                                        }
+                                        _ => {
+                                            // never
+                                            return Err("..> clashing in builder".to_string());
+                                        }
                                     }
                                 }
                             }
                             RepititionTokenVariant::Round => {
-                                match &mut ret[repitition_current_position].ellipsis {
-                                    GraphNodeEllipsisEnum::None => {
-                                        ret[repitition_current_position].ellipsis =
-                                            GraphNodeEllipsisEnum::Round(vec![
-                                                repitition_current_position,
-                                            ]);
-                                    }
-                                    GraphNodeEllipsisEnum::Round(items) => {
-                                        items.push(repitition_current_position);
-                                    }
-                                    _ => {
-                                        // never
-                                        return Err("(...) clashing in builder".to_string());
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    match &mut ret[repitition_current_position].ellipsis {
+                                        GraphNodeEllipsisEnum::None => {
+                                            ret[repitition_current_position].ellipsis =
+                                                GraphNodeEllipsisEnum::Round(vec![
+                                                    repitition_current_position,
+                                                ]);
+                                        }
+                                        GraphNodeEllipsisEnum::Round(items) => {
+                                            items.push(repitition_current_position);
+                                        }
+                                        _ => {
+                                            // never
+                                            return Err("(...) clashing in builder".to_string());
+                                        }
                                     }
                                 }
                             }
                             RepititionTokenVariant::Square => {
-                                match &mut ret[repitition_current_position].ellipsis {
-                                    GraphNodeEllipsisEnum::None => {
-                                        ret[repitition_current_position].ellipsis =
-                                            GraphNodeEllipsisEnum::Square(vec![
-                                                repitition_current_position,
-                                            ]);
-                                    }
-                                    GraphNodeEllipsisEnum::Square(items) => {
-                                        items.push(repitition_current_position);
-                                    }
-                                    _ => {
-                                        // never
-                                        return Err("[...] clashing in builder".to_string());
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    match &mut ret[repitition_current_position].ellipsis {
+                                        GraphNodeEllipsisEnum::None => {
+                                            ret[repitition_current_position].ellipsis =
+                                                GraphNodeEllipsisEnum::Square(vec![
+                                                    repitition_current_position,
+                                                ]);
+                                        }
+                                        GraphNodeEllipsisEnum::Square(items) => {
+                                            items.push(repitition_current_position);
+                                        }
+                                        _ => {
+                                            // never
+                                            return Err("[...] clashing in builder".to_string());
+                                        }
                                     }
                                 }
                             }
                             RepititionTokenVariant::Curly => {
-                                match &mut ret[repitition_current_position].ellipsis {
-                                    GraphNodeEllipsisEnum::None => {
-                                        ret[repitition_current_position].ellipsis =
-                                            GraphNodeEllipsisEnum::Curly(vec![
-                                                repitition_current_position,
-                                            ]);
-                                    }
-                                    GraphNodeEllipsisEnum::Curly(items) => {
-                                        items.push(repitition_current_position);
-                                    }
-                                    _ => {
-                                        // never
-                                        return Err("{...} clashing in builder".to_string());
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    match &mut ret[repitition_current_position].ellipsis {
+                                        GraphNodeEllipsisEnum::None => {
+                                            ret[repitition_current_position].ellipsis =
+                                                GraphNodeEllipsisEnum::Curly(vec![
+                                                    repitition_current_position,
+                                                ]);
+                                        }
+                                        GraphNodeEllipsisEnum::Curly(items) => {
+                                            items.push(repitition_current_position);
+                                        }
+                                        _ => {
+                                            // never
+                                            return Err("{...} clashing in builder".to_string());
+                                        }
                                     }
                                 }
                             }
                             RepititionTokenVariant::ScopeBlocking => {
-                                ret[repitition_current_position]
-                                    .scope_blocking
-                                    .push(repitition_current_position);
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    ret[repitition_current_position]
+                                        .scope_blocking
+                                        .push(repitition_current_position);
+                                }
                             }
                             RepititionTokenVariant::StatementBlocking => {
-                                ret[repitition_current_position]
-                                    .statement_blocking
-                                    .push(repitition_current_position);
+                                if last_node_in_loop {
+                                    // delete the current node
+                                    ret.pop();
+                                    // redirect the transitions that were going
+                                    // to the current node back to the loopback
+                                    Self::redirect_transitions(
+                                        ret.last_mut().unwrap(),
+                                        repitition_current_position,
+                                        loop_back_index.unwrap(),
+                                    );
+                                    repitition_current_position = loop_back_index.unwrap();
+                                } else {
+                                    ret[repitition_current_position]
+                                        .statement_blocking
+                                        .push(repitition_current_position);
+                                }
                             }
                             RepititionTokenVariant::SetStart => {
                                 set_start = true;

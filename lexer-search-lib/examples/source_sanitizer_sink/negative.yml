@@ -1,11 +1,11 @@
 patterns:
 - |-
   $X = ..! source ..! ;
-  ..* ..} $NEWX = ..! %X ..! ; ..*
   ..}
+  ..* $NEWX = ..! %X ..! ; ..} ..*
   sanitize(&mut $X)
-  ..* ..} $NEWX = ..! %X ..! ; ..*
   ..}
+  ..* $NEWX = ..! %X ..! ; ..} ..*
   sink($X)
 name: negative
 group:
