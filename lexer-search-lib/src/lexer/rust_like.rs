@@ -420,6 +420,7 @@ impl super::Lexer for Lexer {
                             || byte == b'>'
                             || byte == b'}'
                             || byte == b'!'
+                            || byte == b'|'
                             || byte == b'*'
                             || byte == b'^'
                         {
@@ -430,6 +431,7 @@ impl super::Lexer for Lexer {
                                 b'}' => EllipsisEnum::SBE(false),
                                 b'!' => EllipsisEnum::SBE(true),
                                 b'*' => EllipsisEnum::Jump,
+                                b'|' => EllipsisEnum::JumpSep,
                                 b'^' => EllipsisEnum::SetStart,
                                 _ => unreachable!(),
                             };

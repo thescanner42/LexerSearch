@@ -120,6 +120,8 @@ pub enum EllipsisEnum {
     SBE(bool),
     /// ..*
     Jump,
+    /// ..|
+    JumpSep,
     /// ..^
     SetStart,
 }

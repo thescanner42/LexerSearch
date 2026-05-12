@@ -11,7 +11,7 @@ use crate::{
     engine::{
         canonicalizer::Canonicalizer,
         token::{
-            BracketStack, GraphBuilderBracketType, Repitition, RepititionTokenVariant, Token,
+            BracketStack, GraphBuilderBracketType, MultiRepitition, RepititionTokenVariant, Token,
             TokenVariant,
         },
     },
@@ -208,9 +208,6 @@ pub enum GraphTokenVariant {
     Captureable(Box<[u8]>),
     /// see LexerTokenVariant for more details
     LexicalLevelChange(i32),
-    /// index N on capture stack was matched
-    Backref(usize),
-    BackrefReplace(usize),
 }
 
 // lossy display for --debug-graph
@@ -243,8 +240,6 @@ impl fmt::Display for GraphTokenVariant {
                 }
             }
             GraphTokenVariant::LexicalLevelChange(v) => write!(f, "l:{v}"),
-            GraphTokenVariant::Backref(n) => write!(f, "r:{n}"),
-            GraphTokenVariant::BackrefReplace(n) => write!(f, "rr:{n}"),
         }
     }
 }
@@ -276,12 +271,18 @@ pub enum GraphBuilderNodeEllipsisEnum {
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct GraphBuilderNode {
     pub(crate) edge: HashMap<GraphTokenVariant, SetStartEnum>,
-    pub(crate) repitition: HashMap<Repitition, usize>,
+    pub(crate) repitition: HashMap<MultiRepitition, usize>,
     pub(crate) ellipsis: Option<GraphBuilderNodeEllipsisEnum>,
     pub(crate) scope_blocking: Option<usize>,
     pub(crate) statement_blocking: Option<usize>,
     pub(crate) create_capture: Option<SetStartEnum>,
     pub(crate) non_capture: Option<SetStartEnum>,
+
+    /// associates capture index being replaced with where to go    
+    pub(crate) backref: HashMap<usize, SetStartEnum>,
+    pub(crate) create_replace: HashMap<usize, SetStartEnum>,
+    pub(crate) backref_replace: HashMap<usize, SetStartEnum>,
+
     pub(crate) full_match: Vec<PatternInfo>,
 }
 
@@ -316,9 +317,9 @@ impl GraphBuilder {
         let mut bracket_stack: BracketStack = Default::default();
         let mut canonicalizer = Canonicalizer::new(max_token_length);
         let mut graph_position = 0usize;
-        // the current reptitition and the captures that were created in the
-        // repitition
-        let mut current_repitition: Option<(Repitition, Vec<Box<[u8]>>)> = None;
+        // the current multi reptitition and the captures that were created in
+        // the last repitition
+        let mut current_repitition: Option<(MultiRepitition, Vec<Box<[u8]>>)> = None;
         let mut set_start = false;
 
         // keep track of first time seeing capture vs backreference
@@ -392,6 +393,24 @@ impl GraphBuilder {
             }
 
             let nodes_len = self.nodes.len();
+
+            if matches!(token.variant, TokenVariant::Ellipsis(EllipsisEnum::JumpSep)) {
+                match current_repitition.as_mut() {
+                    None => {
+                        return Err("..| only allowed in repitition".to_string());
+                    }
+                    Some((v, new_captures)) => {
+                        if !new_captures.is_empty() {
+                            return Err(
+                                "a repitition must have a sum of zero captures created".to_string()
+                            );
+                        }
+                        v.push_repitition();
+                    }
+                }
+                continue;
+            }
+
             if matches!(token.variant, TokenVariant::Ellipsis(EllipsisEnum::Jump)) {
                 // start or stop of a repitition
                 match current_repitition.take() {
@@ -416,11 +435,11 @@ impl GraphBuilder {
                     }
                     None => {
                         // begin ..*
-                        let mut r: Repitition = Default::default();
+                        let mut r: MultiRepitition = Default::default();
                         if std::mem::take(&mut set_start) {
                             r.push(RepititionTokenVariant::SetStart);
                         }
-                        current_repitition = Some((Default::default(), Default::default()));
+                        current_repitition = Some((r, Default::default()));
                     }
                 }
                 continue;
@@ -439,7 +458,7 @@ impl GraphBuilder {
                             RepititionTokenVariant::LexicalLevelChange(v)
                         }
                         TokenVariant::Ellipsis(ellipsis_enum) => match ellipsis_enum {
-                            EllipsisEnum::Jump => unreachable!(), // above
+                            EllipsisEnum::Jump | EllipsisEnum::JumpSep => unreachable!(), // above
                             EllipsisEnum::Normal => match bracket_stack.last() {
                                 None => RepititionTokenVariant::Uncontained,
                                 Some(v) => match v {
@@ -474,7 +493,8 @@ impl GraphBuilder {
                                         } else {
                                             // create capture
                                             new_captures.push(Box::<[_]>::from(&items[1..]));
-                                            captures.insert(items[1..].into(), capture_count_increment);
+                                            captures
+                                                .insert(items[1..].into(), capture_count_increment);
                                             capture_count_increment += 1;
                                             RepititionTokenVariant::CreateCapture
                                         }
@@ -482,17 +502,20 @@ impl GraphBuilder {
                                 }
                                 b'%' => {
                                     // replace capture
-                                    match new_captures.pop() {
-                                        Some(new_capture) => {
-                                            captures.remove(&new_capture).unwrap();
-                                            capture_count_increment -= 1;
-                                            if let Some(v) = captures.get(&items[1..]) {
-                                                RepititionTokenVariant::BackrefReplace(*v)
-                                            } else {
-                                                return Err("backref replace must reference an existing capture".to_string());
+                                    if let Some(&v) = captures.get(&items[1..]) {
+                                        match new_captures.pop() {
+                                            Some(new_capture) => {
+                                                captures.remove(&new_capture).unwrap();
+                                                capture_count_increment -= 1;
+                                                RepititionTokenVariant::BackrefReplace(v)
                                             }
+                                            None => RepititionTokenVariant::CreateReplace(v),
                                         }
-                                        None => return Err("expecting prior capture in repitition".to_string()),
+                                    } else {
+                                        return Err(
+                                            "backref replace must reference an existing capture"
+                                                .to_string(),
+                                        );
                                     }
                                 }
                                 _ => unreachable!(),
@@ -506,7 +529,7 @@ impl GraphBuilder {
             match token.variant {
                 TokenVariant::Ellipsis(e) => {
                     match e {
-                        EllipsisEnum::Jump => unreachable!(), // handled above
+                        EllipsisEnum::Jump | EllipsisEnum::JumpSep => unreachable!(), // handled above
                         EllipsisEnum::CBE => {
                             // corner bracket ellipsis
                             match &self.nodes[graph_position].ellipsis {
@@ -707,31 +730,106 @@ impl GraphBuilder {
                     }
                 }
 
-                _ => {
+                TokenVariant::Capture(items) => {
                     let set_start = std::mem::take(&mut set_start);
 
-                    // convert the token variant to graph token variant
-                    let variant = match token.variant {
-                        TokenVariant::OverlongIdentifier
-                        | TokenVariant::OverlongString
-                        | TokenVariant::OverlongCapture
-                        | TokenVariant::Ellipsis(_) => unreachable!(), // handled by various paths above
-                        TokenVariant::Byte(b) => GraphTokenVariant::Byte(b),
-                        TokenVariant::String(items) | TokenVariant::Identifier(items) => {
-                            GraphTokenVariant::Captureable(items)
+                    if *items == *b"$_" {
+                        match self.nodes[graph_position].non_capture.as_ref() {
+                            Some(v) => match v {
+                                SetStartEnum::No(no_index) => {
+                                    if !set_start {
+                                        graph_position = *no_index;
+                                    } else {
+                                        self.nodes[graph_position].non_capture =
+                                            Some(SetStartEnum::Both(*no_index, nodes_len));
+                                        self.nodes.push(Default::default());
+                                        graph_position = nodes_len;
+                                    }
+                                }
+                                SetStartEnum::Yes(yes_index) => {
+                                    if set_start {
+                                        graph_position = *yes_index;
+                                    } else {
+                                        self.nodes[graph_position].non_capture =
+                                            Some(SetStartEnum::Both(nodes_len, *yes_index));
+                                        self.nodes.push(Default::default());
+                                        graph_position = nodes_len;
+                                    }
+                                }
+                                SetStartEnum::Both(no_index, yes_index) => {
+                                    if set_start {
+                                        graph_position = *yes_index;
+                                    } else {
+                                        graph_position = *no_index;
+                                    }
+                                }
+                            },
+                            None => {
+                                self.nodes[graph_position].non_capture =
+                                    Some(SetStartEnum::from(nodes_len, set_start));
+                                self.nodes.push(Default::default());
+                                graph_position = nodes_len;
+                            }
                         }
-                        TokenVariant::LexicalLevelChange(v) => {
-                            GraphTokenVariant::LexicalLevelChange(v)
+                        continue;
+                    } else {
+                        if items[0] != b'$' {
+                            return Err("backref replace only allowed in repitition".to_string());
                         }
-                        TokenVariant::Capture(items) => {
-                            if *items == *b"$_" {
-                                match self.nodes[graph_position].non_capture.as_ref() {
+                        match captures.get(&items[1..]) {
+                            Some(ref_num) => {
+                                // capture was stated previously, this is a
+                                // backreference
+                                match self.nodes[graph_position].backref.entry(*ref_num) {
+                                    std::collections::hash_map::Entry::Occupied(
+                                        mut occupied_entry,
+                                    ) => match occupied_entry.get() {
+                                        SetStartEnum::No(no_index) => {
+                                            if !set_start {
+                                                graph_position = *no_index;
+                                            } else {
+                                                *occupied_entry.get_mut() =
+                                                    SetStartEnum::Both(*no_index, nodes_len);
+                                                self.nodes.push(Default::default());
+                                                graph_position = nodes_len;
+                                            }
+                                        }
+                                        SetStartEnum::Yes(yes_index) => {
+                                            if set_start {
+                                                graph_position = *yes_index;
+                                            } else {
+                                                *occupied_entry.get_mut() =
+                                                    SetStartEnum::Both(nodes_len, *yes_index);
+                                                self.nodes.push(Default::default());
+                                                graph_position = nodes_len;
+                                            }
+                                        }
+                                        SetStartEnum::Both(no_index, yes_index) => {
+                                            if set_start {
+                                                graph_position = *yes_index;
+                                            } else {
+                                                graph_position = *no_index;
+                                            }
+                                        }
+                                    },
+                                    std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                                        vacant_entry
+                                            .insert(SetStartEnum::from(nodes_len, set_start));
+                                        self.nodes.push(Default::default());
+                                        graph_position = nodes_len;
+                                    }
+                                }
+                            }
+                            None => {
+                                captures.insert(items[1..].into(), capture_count_increment);
+                                capture_count_increment += 1;
+                                match self.nodes[graph_position].create_capture.as_ref() {
                                     Some(v) => match v {
                                         SetStartEnum::No(no_index) => {
                                             if !set_start {
                                                 graph_position = *no_index;
                                             } else {
-                                                self.nodes[graph_position].non_capture =
+                                                self.nodes[graph_position].create_capture =
                                                     Some(SetStartEnum::Both(*no_index, nodes_len));
                                                 self.nodes.push(Default::default());
                                                 graph_position = nodes_len;
@@ -741,7 +839,7 @@ impl GraphBuilder {
                                             if set_start {
                                                 graph_position = *yes_index;
                                             } else {
-                                                self.nodes[graph_position].non_capture =
+                                                self.nodes[graph_position].create_capture =
                                                     Some(SetStartEnum::Both(nodes_len, *yes_index));
                                                 self.nodes.push(Default::default());
                                                 graph_position = nodes_len;
@@ -756,73 +854,34 @@ impl GraphBuilder {
                                         }
                                     },
                                     None => {
-                                        self.nodes[graph_position].non_capture =
+                                        self.nodes[graph_position].create_capture =
                                             Some(SetStartEnum::from(nodes_len, set_start));
                                         self.nodes.push(Default::default());
                                         graph_position = nodes_len;
                                     }
                                 }
                                 continue;
-                            } else {
-                                if items[0] != b'$' {
-                                    return Err(
-                                        "backref replace only allowed in repitition".to_string()
-                                    );
-                                }
-                                match captures.get(&items[1..]) {
-                                    Some(ref_num) => {
-                                        // capture was stated previously, this is a
-                                        // backreference
-                                        GraphTokenVariant::Backref(*ref_num)
-                                    }
-                                    None => {
-                                        captures.insert(items[1..].into(), capture_count_increment);
-                                        capture_count_increment += 1;
-                                        match self.nodes[graph_position].create_capture.as_ref() {
-                                            Some(v) => match v {
-                                                SetStartEnum::No(no_index) => {
-                                                    if !set_start {
-                                                        graph_position = *no_index;
-                                                    } else {
-                                                        self.nodes[graph_position].create_capture =
-                                                            Some(SetStartEnum::Both(
-                                                                *no_index, nodes_len,
-                                                            ));
-                                                        self.nodes.push(Default::default());
-                                                        graph_position = nodes_len;
-                                                    }
-                                                }
-                                                SetStartEnum::Yes(yes_index) => {
-                                                    if set_start {
-                                                        graph_position = *yes_index;
-                                                    } else {
-                                                        self.nodes[graph_position].create_capture =
-                                                            Some(SetStartEnum::Both(
-                                                                nodes_len, *yes_index,
-                                                            ));
-                                                        self.nodes.push(Default::default());
-                                                        graph_position = nodes_len;
-                                                    }
-                                                }
-                                                SetStartEnum::Both(no_index, yes_index) => {
-                                                    if set_start {
-                                                        graph_position = *yes_index;
-                                                    } else {
-                                                        graph_position = *no_index;
-                                                    }
-                                                }
-                                            },
-                                            None => {
-                                                self.nodes[graph_position].create_capture =
-                                                    Some(SetStartEnum::from(nodes_len, set_start));
-                                                self.nodes.push(Default::default());
-                                                graph_position = nodes_len;
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                }
                             }
+                        }
+                    }
+                }
+
+                _ => {
+                    let set_start = std::mem::take(&mut set_start);
+
+                    // convert the token variant to graph token variant
+                    let variant = match token.variant {
+                        TokenVariant::OverlongIdentifier
+                        | TokenVariant::OverlongString
+                        | TokenVariant::OverlongCapture
+                        | TokenVariant::Ellipsis(_)
+                        | TokenVariant::Capture(_) => unreachable!(), // handled by various paths above
+                        TokenVariant::Byte(b) => GraphTokenVariant::Byte(b),
+                        TokenVariant::String(items) | TokenVariant::Identifier(items) => {
+                            GraphTokenVariant::Captureable(items)
+                        }
+                        TokenVariant::LexicalLevelChange(v) => {
+                            GraphTokenVariant::LexicalLevelChange(v)
                         }
                     };
 
@@ -941,6 +1000,39 @@ impl GraphBuilder {
 
         dst.full_match.extend_from_slice(&src.full_match);
 
+        for (k, v) in src.backref.iter() {
+            match dst.backref.entry(k.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().extend_from_slice(v);
+                }
+                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(v.to_vec());
+                }
+            }
+        }
+
+        for (k, v) in src.backref_replace.iter() {
+            match dst.backref_replace.entry(k.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().extend_from_slice(v);
+                }
+                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(v.to_vec());
+                }
+            }
+        }
+
+        for (k, v) in src.create_replace.iter() {
+            match dst.create_replace.entry(k.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().extend_from_slice(v);
+                }
+                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(v.to_vec());
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1004,6 +1096,18 @@ impl GraphBuilder {
 
         rewrite_setstart_enum_vec(&mut g.create_capture, src, dst);
         rewrite_setstart_enum_vec(&mut g.non_capture, src, dst);
+
+        for v in g.backref.values_mut() {
+            rewrite_setstart_enum_vec(v, src, dst);
+        }
+
+        for v in g.backref_replace.values_mut() {
+            rewrite_setstart_enum_vec(v, src, dst);
+        }
+
+        for v in g.create_replace.values_mut() {
+            rewrite_setstart_enum_vec(v, src, dst);
+        }
     }
 
     fn build_subroutine(
@@ -1323,10 +1427,7 @@ impl GraphBuilder {
                     Self::build_subroutine(self, yes_index, ret, None)?;
                     ret[ret_current_position]
                         .create_capture
-                        .push(SetStartEnum::No(out_dst_no));
-                    ret[ret_current_position]
-                        .create_capture
-                        .push(SetStartEnum::Yes(out_dst_yes));
+                        .push(SetStartEnum::Both(out_dst_no, out_dst_yes));
                 }
             }
         }
@@ -1358,10 +1459,121 @@ impl GraphBuilder {
                     Self::build_subroutine(self, yes_index, ret, None)?;
                     ret[ret_current_position]
                         .non_capture
-                        .push(SetStartEnum::No(out_dst_no));
+                        .push(SetStartEnum::Both(out_dst_no, out_dst_yes));
+                }
+            }
+        }
+
+        for (capture_index, sse) in std::mem::take(&mut self.nodes[in_position].backref) {
+            match sse {
+                SetStartEnum::No(no_index) => {
+                    let out_dst = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, no_index, ret, None)?;
                     ret[ret_current_position]
-                        .non_capture
-                        .push(SetStartEnum::Yes(out_dst_yes));
+                        .backref
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::No(out_dst));
+                }
+                SetStartEnum::Yes(yes_index) => {
+                    let out_dst = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, yes_index, ret, None)?;
+                    ret[ret_current_position]
+                        .backref
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::Yes(out_dst));
+                }
+                SetStartEnum::Both(no_index, yes_index) => {
+                    let out_dst_no = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, no_index, ret, None)?;
+                    let out_dst_yes = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, yes_index, ret, None)?;
+                    ret[ret_current_position]
+                        .backref
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::Both(out_dst_no, out_dst_yes));
+                }
+            }
+        }
+
+        for (capture_index, sse) in std::mem::take(&mut self.nodes[in_position].create_replace) {
+            match sse {
+                SetStartEnum::No(no_index) => {
+                    let out_dst = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, no_index, ret, None)?;
+                    ret[ret_current_position]
+                        .create_replace
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::No(out_dst));
+                }
+                SetStartEnum::Yes(yes_index) => {
+                    let out_dst = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, yes_index, ret, None)?;
+                    ret[ret_current_position]
+                        .create_replace
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::Yes(out_dst));
+                }
+                SetStartEnum::Both(no_index, yes_index) => {
+                    let out_dst_no = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, no_index, ret, None)?;
+                    let out_dst_yes = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, yes_index, ret, None)?;
+                    ret[ret_current_position]
+                        .create_replace
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::Both(out_dst_no, out_dst_yes));
+                }
+            }
+        }
+
+        for (capture_index, sse) in std::mem::take(&mut self.nodes[in_position].backref_replace) {
+            match sse {
+                SetStartEnum::No(no_index) => {
+                    let out_dst = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, no_index, ret, None)?;
+                    ret[ret_current_position]
+                        .backref_replace
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::No(out_dst));
+                }
+                SetStartEnum::Yes(yes_index) => {
+                    let out_dst = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, yes_index, ret, None)?;
+                    ret[ret_current_position]
+                        .backref_replace
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::Yes(out_dst));
+                }
+                SetStartEnum::Both(no_index, yes_index) => {
+                    let out_dst_no = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, no_index, ret, None)?;
+                    let out_dst_yes = ret.len();
+                    ret.push(Default::default());
+                    Self::build_subroutine(self, yes_index, ret, None)?;
+                    ret[ret_current_position]
+                        .backref_replace
+                        .entry(capture_index)
+                        .or_default()
+                        .push(SetStartEnum::Both(out_dst_no, out_dst_yes));
                 }
             }
         }
@@ -1384,326 +1596,358 @@ impl GraphBuilder {
         ret[ret_current_position] = before_modification;
 
         {
-            let mut repitition_current_position = ret_current_position;
-            for (repitition, _) in repititions.drain() {
-                let repitition = repitition.get_vec();
-                for i in 0..2 {
-                    let is_loop = i == 1;
-                    let mut set_start = false;
-                    let loop_back_index = if is_loop {
-                        Some(repitition_current_position)
-                    } else {
-                        None
-                    };
-                    for (i, node) in repitition.iter().enumerate() {
-                        let last_node_in_loop = is_loop && i == repitition.len() - 1;
+            for (multi_repitition, _) in repititions.drain() {
+                let multi_repitition = multi_repitition.get_vec();
+                let mut loop_back_index: Option<usize> = None;
 
-                        if repitition_current_position == ret_current_position {
+                for repitition in multi_repitition {
+                    let mut repitition_current_position = ret_current_position;
+                    for i in 0..2 {
+                        // first it creates the nodes for the 1 case, up to the
+                        // loopback node. then, it creates the loop which wraps
+                        // back to the loopback node (1 or more case)
+                        let is_loop = i == 1;
+                        let mut set_start = false;
+                        if loop_back_index.is_none() && is_loop {
+                            loop_back_index = Some(repitition_current_position);
+                        }
+                        for (i, node) in repitition.iter().enumerate() {
+                            let last_in_cycle = i == repitition.len() - 1;
+
+                            if repitition_current_position == ret_current_position {
+                                match node {
+                                    RepititionTokenVariant::Uncontained
+                                    | RepititionTokenVariant::Corner
+                                    | RepititionTokenVariant::Round
+                                    | RepititionTokenVariant::Square
+                                    | RepititionTokenVariant::Curly
+                                    | RepititionTokenVariant::ScopeBlocking
+                                    | RepititionTokenVariant::StatementBlocking => {
+                                        // TODO there isn't a strong reason for this
+                                        // - simplifies implementation and there's
+                                        // always a different way of writing the
+                                        // pattern (reflexive at end instead of at
+                                        // beginning)
+                                        return Err("repitition requires content before reflexive transition (e.g. ...)".to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             match node {
-                                RepititionTokenVariant::Uncontained
-                                | RepititionTokenVariant::Corner
-                                | RepititionTokenVariant::Round
-                                | RepititionTokenVariant::Square
-                                | RepititionTokenVariant::Curly
-                                | RepititionTokenVariant::ScopeBlocking
-                                | RepititionTokenVariant::StatementBlocking => {
-                                    // TODO there isn't a strong reason for this
-                                    // - simplifies implementation and there's
-                                    // always a different way of writing the
-                                    // pattern (reflexive at end instead of at
-                                    // beginning)
-                                    return Err("repitition requires content before reflexive transition (e.g. ...)".to_string());
+                                RepititionTokenVariant::Captureable(_)
+                                | RepititionTokenVariant::Byte(_)
+                                | RepititionTokenVariant::LexicalLevelChange(_) => {
+                                    let out_dst = if last_in_cycle && loop_back_index.is_some() {
+                                        loop_back_index.unwrap()
+                                    } else {
+                                        let r = ret.len();
+                                        ret.push(Default::default());
+                                        r
+                                    };
+
+                                    let transition_to_insert = match node.clone() {
+                                        RepititionTokenVariant::Byte(b) => {
+                                            GraphTokenVariant::Byte(b)
+                                        }
+                                        RepititionTokenVariant::Captureable(items) => {
+                                            GraphTokenVariant::Captureable(items)
+                                        }
+                                        RepititionTokenVariant::LexicalLevelChange(lv) => {
+                                            GraphTokenVariant::LexicalLevelChange(lv)
+                                        }
+                                        _ => unreachable!(),
+                                    };
+
+                                    GraphBuilder::insert_edge(
+                                        &mut ret[repitition_current_position],
+                                        transition_to_insert,
+                                        SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                    );
+                                    repitition_current_position = out_dst;
                                 }
-                                _ => {}
+                                RepititionTokenVariant::Uncontained => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        // since each unique repitition is independent there is
+                                        // no need to separate the 0 and 1 or more cases
+                                        //
+                                        // simply add the loop at the current node
+                                        match &mut ret[repitition_current_position].ellipsis {
+                                            GraphNodeEllipsisEnum::None => {
+                                                ret[repitition_current_position].ellipsis =
+                                                    GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                                        vec![repitition_current_position],
+                                                        vec![],
+                                                    );
+                                            }
+                                            GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                                un_items,
+                                                _,
+                                            ) => {
+                                                un_items.push(repitition_current_position);
+                                            }
+                                            _ => {
+                                                // never
+                                                return Err("... clashing in builder".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                RepititionTokenVariant::Corner => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        match &mut ret[repitition_current_position].ellipsis {
+                                            GraphNodeEllipsisEnum::None => {
+                                                ret[repitition_current_position].ellipsis =
+                                                    GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                                        vec![],
+                                                        vec![repitition_current_position],
+                                                    );
+                                            }
+                                            GraphNodeEllipsisEnum::UncontainedAndCorner(
+                                                _,
+                                                corner_items,
+                                            ) => {
+                                                corner_items.push(repitition_current_position);
+                                            }
+                                            _ => {
+                                                // never
+                                                return Err("..> clashing in builder".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                RepititionTokenVariant::Round => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        match &mut ret[repitition_current_position].ellipsis {
+                                            GraphNodeEllipsisEnum::None => {
+                                                ret[repitition_current_position].ellipsis =
+                                                    GraphNodeEllipsisEnum::Round(vec![
+                                                        repitition_current_position,
+                                                    ]);
+                                            }
+                                            GraphNodeEllipsisEnum::Round(items) => {
+                                                items.push(repitition_current_position);
+                                            }
+                                            _ => {
+                                                // never
+                                                return Err("(...) clashing in builder".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                RepititionTokenVariant::Square => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        match &mut ret[repitition_current_position].ellipsis {
+                                            GraphNodeEllipsisEnum::None => {
+                                                ret[repitition_current_position].ellipsis =
+                                                    GraphNodeEllipsisEnum::Square(vec![
+                                                        repitition_current_position,
+                                                    ]);
+                                            }
+                                            GraphNodeEllipsisEnum::Square(items) => {
+                                                items.push(repitition_current_position);
+                                            }
+                                            _ => {
+                                                // never
+                                                return Err("[...] clashing in builder".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                RepititionTokenVariant::Curly => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        match &mut ret[repitition_current_position].ellipsis {
+                                            GraphNodeEllipsisEnum::None => {
+                                                ret[repitition_current_position].ellipsis =
+                                                    GraphNodeEllipsisEnum::Curly(vec![
+                                                        repitition_current_position,
+                                                    ]);
+                                            }
+                                            GraphNodeEllipsisEnum::Curly(items) => {
+                                                items.push(repitition_current_position);
+                                            }
+                                            _ => {
+                                                // never
+                                                return Err("{...} clashing in builder".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                RepititionTokenVariant::ScopeBlocking => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        ret[repitition_current_position]
+                                            .scope_blocking
+                                            .push(repitition_current_position);
+                                    }
+                                }
+                                RepititionTokenVariant::StatementBlocking => {
+                                    if last_in_cycle && loop_back_index.is_some() {
+                                        // delete the current node
+                                        ret.pop();
+                                        // redirect the transitions that were going
+                                        // to the current node back to the loopback
+                                        Self::redirect_transitions(
+                                            ret.last_mut().unwrap(),
+                                            repitition_current_position,
+                                            loop_back_index.unwrap(),
+                                        );
+                                        repitition_current_position = loop_back_index.unwrap();
+                                    } else {
+                                        ret[repitition_current_position]
+                                            .statement_blocking
+                                            .push(repitition_current_position);
+                                    }
+                                }
+                                RepititionTokenVariant::SetStart => {
+                                    set_start = true;
+                                }
+                                RepititionTokenVariant::NonCapturingCapture => {
+                                    let out_dst = if last_in_cycle && loop_back_index.is_some() {
+                                        loop_back_index.unwrap()
+                                    } else {
+                                        let r = ret.len();
+                                        ret.push(Default::default());
+                                        r
+                                    };
+
+                                    ret[repitition_current_position].non_capture.push(
+                                        SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                    );
+                                    repitition_current_position = out_dst;
+                                }
+                                RepititionTokenVariant::CreateCapture => {
+                                    let out_dst = if last_in_cycle && loop_back_index.is_some() {
+                                        loop_back_index.unwrap()
+                                    } else {
+                                        let r = ret.len();
+                                        ret.push(Default::default());
+                                        r
+                                    };
+
+                                    ret[repitition_current_position].create_capture.push(
+                                        SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                    );
+                                    repitition_current_position = out_dst;
+                                }
+                                RepititionTokenVariant::CreateReplace(n) => {
+                                    let out_dst = if last_in_cycle && loop_back_index.is_some() {
+                                        loop_back_index.unwrap()
+                                    } else {
+                                        let r = ret.len();
+                                        ret.push(Default::default());
+                                        r
+                                    };
+                                    ret[repitition_current_position].create_replace.entry(*n).or_default().push(
+                                        SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                    );
+                                    repitition_current_position = out_dst;
+                                }
+                                RepititionTokenVariant::Backref(n) => {
+                                    let out_dst = if last_in_cycle && loop_back_index.is_some() {
+                                        loop_back_index.unwrap()
+                                    } else {
+                                        let r = ret.len();
+                                        ret.push(Default::default());
+                                        r
+                                    };
+                                    ret[repitition_current_position].backref.entry(*n).or_default().push(
+                                        SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                    );
+                                    repitition_current_position = out_dst;
+                                }
+                                RepititionTokenVariant::BackrefReplace(n) => {
+                                    let out_dst = if last_in_cycle && loop_back_index.is_some() {
+                                        loop_back_index.unwrap()
+                                    } else {
+                                        let r = ret.len();
+                                        ret.push(Default::default());
+                                        r
+                                    };
+                                    ret[repitition_current_position].backref_replace.entry(*n).or_default().push(
+                                        SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
+                                    );
+                                    repitition_current_position = out_dst;
+                                }
                             }
                         }
 
-                        match node {
-                            RepititionTokenVariant::Captureable(_)
-                            | RepititionTokenVariant::Byte(_)
-                            | RepititionTokenVariant::LexicalLevelChange(_)
-                            | RepititionTokenVariant::Backref(_)
-                            | RepititionTokenVariant::BackrefReplace(_) => {
-                                let out_dst = if last_node_in_loop {
-                                    loop_back_index.unwrap()
-                                } else {
-                                    let r = ret.len();
-                                    ret.push(Default::default());
-                                    r
-                                };
-
-                                let transition_to_insert = match node.clone() {
-                                    RepititionTokenVariant::Byte(b) => GraphTokenVariant::Byte(b),
-                                    RepititionTokenVariant::Captureable(items) => {
-                                        GraphTokenVariant::Captureable(items)
-                                    }
-                                    RepititionTokenVariant::LexicalLevelChange(lv) => {
-                                        GraphTokenVariant::LexicalLevelChange(lv)
-                                    }
-                                    RepititionTokenVariant::Backref(n) => {
-                                        GraphTokenVariant::Backref(n)
-                                    }
-                                    RepititionTokenVariant::BackrefReplace(n) => {
-                                        GraphTokenVariant::BackrefReplace(n)
-                                    }
-                                    _ => unreachable!(),
-                                };
-
-                                GraphBuilder::insert_edge(
-                                    &mut ret[repitition_current_position],
-                                    transition_to_insert,
-                                    SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
-                                );
-                                repitition_current_position = out_dst;
-                            }
-                            RepititionTokenVariant::Uncontained => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    // since each unique repitition is independent there is
-                                    // no need to separate the 0 and 1 or more cases
-                                    //
-                                    // simply add the loop at the current node
-                                    match &mut ret[repitition_current_position].ellipsis {
-                                        GraphNodeEllipsisEnum::None => {
-                                            ret[repitition_current_position].ellipsis =
-                                                GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                                    vec![repitition_current_position],
-                                                    vec![],
-                                                );
-                                        }
-                                        GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                            un_items,
-                                            _,
-                                        ) => {
-                                            un_items.push(repitition_current_position);
-                                        }
-                                        _ => {
-                                            // never
-                                            return Err("... clashing in builder".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            RepititionTokenVariant::Corner => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    match &mut ret[repitition_current_position].ellipsis {
-                                        GraphNodeEllipsisEnum::None => {
-                                            ret[repitition_current_position].ellipsis =
-                                                GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                                    vec![],
-                                                    vec![repitition_current_position],
-                                                );
-                                        }
-                                        GraphNodeEllipsisEnum::UncontainedAndCorner(
-                                            _,
-                                            corner_items,
-                                        ) => {
-                                            corner_items.push(repitition_current_position);
-                                        }
-                                        _ => {
-                                            // never
-                                            return Err("..> clashing in builder".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            RepititionTokenVariant::Round => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    match &mut ret[repitition_current_position].ellipsis {
-                                        GraphNodeEllipsisEnum::None => {
-                                            ret[repitition_current_position].ellipsis =
-                                                GraphNodeEllipsisEnum::Round(vec![
-                                                    repitition_current_position,
-                                                ]);
-                                        }
-                                        GraphNodeEllipsisEnum::Round(items) => {
-                                            items.push(repitition_current_position);
-                                        }
-                                        _ => {
-                                            // never
-                                            return Err("(...) clashing in builder".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            RepititionTokenVariant::Square => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    match &mut ret[repitition_current_position].ellipsis {
-                                        GraphNodeEllipsisEnum::None => {
-                                            ret[repitition_current_position].ellipsis =
-                                                GraphNodeEllipsisEnum::Square(vec![
-                                                    repitition_current_position,
-                                                ]);
-                                        }
-                                        GraphNodeEllipsisEnum::Square(items) => {
-                                            items.push(repitition_current_position);
-                                        }
-                                        _ => {
-                                            // never
-                                            return Err("[...] clashing in builder".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            RepititionTokenVariant::Curly => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    match &mut ret[repitition_current_position].ellipsis {
-                                        GraphNodeEllipsisEnum::None => {
-                                            ret[repitition_current_position].ellipsis =
-                                                GraphNodeEllipsisEnum::Curly(vec![
-                                                    repitition_current_position,
-                                                ]);
-                                        }
-                                        GraphNodeEllipsisEnum::Curly(items) => {
-                                            items.push(repitition_current_position);
-                                        }
-                                        _ => {
-                                            // never
-                                            return Err("{...} clashing in builder".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            RepititionTokenVariant::ScopeBlocking => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    ret[repitition_current_position]
-                                        .scope_blocking
-                                        .push(repitition_current_position);
-                                }
-                            }
-                            RepititionTokenVariant::StatementBlocking => {
-                                if last_node_in_loop {
-                                    // delete the current node
-                                    ret.pop();
-                                    // redirect the transitions that were going
-                                    // to the current node back to the loopback
-                                    Self::redirect_transitions(
-                                        ret.last_mut().unwrap(),
-                                        repitition_current_position,
-                                        loop_back_index.unwrap(),
-                                    );
-                                    repitition_current_position = loop_back_index.unwrap();
-                                } else {
-                                    ret[repitition_current_position]
-                                        .statement_blocking
-                                        .push(repitition_current_position);
-                                }
-                            }
-                            RepititionTokenVariant::SetStart => {
-                                set_start = true;
-                            }
-                            RepititionTokenVariant::NonCapturingCapture => {
-                                let out_dst = if last_node_in_loop {
-                                    loop_back_index.unwrap()
-                                } else {
-                                    let r = ret.len();
-                                    ret.push(Default::default());
-                                    r
-                                };
-
-                                ret[repitition_current_position].non_capture.push(
-                                    SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
-                                );
-                                repitition_current_position = out_dst;
-                            }
-                            RepititionTokenVariant::CreateCapture => {
-                                let out_dst = if last_node_in_loop {
-                                    loop_back_index.unwrap()
-                                } else {
-                                    let r = ret.len();
-                                    ret.push(Default::default());
-                                    r
-                                };
-
-                                ret[repitition_current_position].create_capture.push(
-                                    SetStartEnum::from(out_dst, std::mem::take(&mut set_start)),
-                                );
-                                repitition_current_position = out_dst;
-                            }
+                        if set_start {
+                            return Err("..^ isn't effective in this position".to_string());
                         }
-                    }
-
-                    if set_start {
-                        return Err("..^ isn't effective in this position".to_string());
-                    }
-
-                    if is_loop {
-                        // transition from the loop node
-                        let new_transitions = new_transitions_only.pop().unwrap();
-                        // transition from the loop node
-                        Self::copy_transitions(
-                            &new_transitions,
-                            &mut ret[repitition_current_position],
-                        )?;
-                        // put the transitions back that were taken before
-                        Self::copy_transitions(&new_transitions, &mut ret[ret_current_position])?;
                     }
                 }
+                // transition from the loop node
+                let new_transitions = new_transitions_only.pop().unwrap();
+                // transition from the loop node
+                Self::copy_transitions(&new_transitions, &mut ret[loop_back_index.unwrap()])?;
+                // put the transitions back that were taken before
+                Self::copy_transitions(&new_transitions, &mut ret[ret_current_position])?;
             }
         }
 
@@ -1753,6 +1997,15 @@ pub struct GraphNode {
     pub create_capture: Vec<SetStartEnum>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub non_capture: Vec<SetStartEnum>,
+
+    /// associates capture index with where to go
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) backref: HashMap<usize, Vec<SetStartEnum>>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) create_replace: HashMap<usize, Vec<SetStartEnum>>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) backref_replace: HashMap<usize, Vec<SetStartEnum>>,
+    
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub full_match: Vec<PatternInfo>,
 }

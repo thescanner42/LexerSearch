@@ -102,6 +102,7 @@ pub enum RepititionTokenVariant {
     Backref(usize),
     CreateCapture,
     BackrefReplace(usize),
+    CreateReplace(usize),
 }
 
 impl RepititionTokenVariant {
@@ -146,6 +147,10 @@ impl RepititionTokenVariant {
                 out.push(14);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             },
+            RepititionTokenVariant::CreateReplace(v) => {
+                out.push(15);
+                out.extend_from_slice(&(*v as u32).to_le_bytes());
+            },
         }
 
         out
@@ -163,40 +168,49 @@ fn seed() -> &'static [u8; 32] {
 }
 
 #[derive(Debug)]
-pub struct Repitition {
+pub struct MultiRepitition {
     incremental_hasher: blake3::Hasher,
-    v: Vec<RepititionTokenVariant>,
+    v: Vec<Vec<RepititionTokenVariant>>,
 }
 
-impl Repitition {
+impl MultiRepitition {
     pub fn push(&mut self, v: RepititionTokenVariant) {
         self.incremental_hasher.update(&v.as_hash_bytes());
-        self.v.push(v);
+
+        self.v
+            .last_mut()
+            .expect("MultiRepitition always contains at least one repetition")
+            .push(v);
     }
 
-    pub fn get_vec(self) -> Vec<RepititionTokenVariant> {
+    pub fn push_repitition(&mut self) {
+        self.incremental_hasher.update(b"\xff");
+        self.v.push(Vec::new());
+    }
+
+    pub fn get_vec(self) -> Vec<Vec<RepititionTokenVariant>> {
         self.v
     }
 }
 
-impl Default for Repitition {
+impl Default for MultiRepitition {
     fn default() -> Self {
         Self {
             incremental_hasher: blake3::Hasher::new_keyed(seed()),
-            v: Default::default(),
+            v: vec![Vec::new()],
         }
     }
 }
 
-impl PartialEq for Repitition {
+impl PartialEq for MultiRepitition {
     fn eq(&self, other: &Self) -> bool {
         self.v == other.v
     }
 }
 
-impl Eq for Repitition {}
+impl Eq for MultiRepitition {}
 
-impl std::hash::Hash for Repitition {
+impl std::hash::Hash for MultiRepitition {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         let digest = self.incremental_hasher.finalize();
         state.write(digest.as_bytes());

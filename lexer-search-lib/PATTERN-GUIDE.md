@@ -206,30 +206,69 @@ For example, the non-capture `$_` can be stated any number of times since it
 does not create a capture. Similarly backreferencing to an existing capture also
 does not create captures.
 
-### Backreference Replace
+### Multi-repetition
 
-Inside a repitition section a backreference replace can be used. For example:
+The pattern `..* a ..* ..* b ..*` matches the following example inputs:
+
+- `a a a a`
+- `b b b b`
+- `a a b b`
+
+The two repitition sections are executed "in series" - the `a`'s must proceed
+the `b`'s. However, there are cases where the repititions should instead be
+executed in parallel.
+
+A repitition section can be separated with `..|`, indicating that it contains
+multiple patterns. In addition to the above examples, `..* a ..| b ..*` will
+also match `b a b a`.
+
+### Replace
+
+Inside a repitition section a capture replace can be used.
+
+It is written with a percent prefix like `%ABC`. It must backreference an
+existing capture, and is used to overwrite the contents of a capture that was
+previously stored (the "destination"). The source to use when replacing the
+capture is based on one of two scenarios:
+
+#### Backreference Replace
+
+If a different previous capture was created in the same repitition section, then
+it first backreferences to its own capture, and if it matches, it then takes the
+content of that previous capture to set the destination. After the previous
+capture is taken, it's as if the previous  capture was never created in the
+first place.
+
+For example:
 
 ```
 $X = ..! source ..! ;
 ..}
-             // VV HERE
 ..* $NEWX = ..! %X ..! ; ..} ..*
 sink($X)
 ```
 
-It is written with an percent prefix like `%ABC`. It must backreference an
-existing capture.
+`$NEWX` is created in the repitition. `%X` checks that its token matches the
+same one captured at `$X`, then takes the token captured by `$NEWX` and puts it
+into `$X`.
 
-If the backreference is valid (because the contents match), it replaces the
-contents of the capture of the same name with the last capture that was created.
-In the above example, it backreference to `$X` and once it matches it takes
-`$NEWX` and stores it into `$X`. Since `$NEWX` was taken, if it is mentioned
-again it will instead create a capture - it's as if it was never created in the
-first place.
+#### Create Capture Replace
 
-The above example repitition creates a capture and then pops that same capture,
-meaning a net change of zero.
+If no captures are created in the repitition section, then the source is
+whatever capture-able token is received as input from the source code.
+
+For example:
+
+```
+$X = ..! source ..! ;
+..}
+..* rev_replace($X, &mut %X) ..* ..}
+sink($X)
+```
+
+No new capture was created in the repitition (note that `$X` is a backreference
+since it was created previously). `%X` sets its content to the capture-able
+token it receives, replacing `$X`.
 
 ## Set Start
 

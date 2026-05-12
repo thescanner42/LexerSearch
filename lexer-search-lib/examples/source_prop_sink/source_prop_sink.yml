@@ -1,0 +1,18 @@
+patterns:
+- |-
+  $X = ..! source ..! ;
+  ..}
+  ..*
+    $NEWX = ..! %X ..! ;
+    ..} 
+  ..|
+    replace(&mut $NEWX, %X)
+    ..}
+  ..|
+    rev_replace($X, &mut %X)
+    ..}
+  ..*
+  sink($X)
+name: source_prop_sink
+languages:
+  - rust

@@ -398,7 +398,6 @@ impl<'g> Matcher<'g> {
 
                     // capture transition
                     for v in graph.nodes[current.trie_position].create_capture.iter() {
-                        // ok - typically a small number of captures
                         let mut new_stack = (*current.capture_stack).clone();
                         new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
                         let new_stack = Arc::new(new_stack);
@@ -421,71 +420,89 @@ impl<'g> Matcher<'g> {
                         });
                     }
 
-                    // backref transitions
-                    for (i, cap) in current.capture_stack.iter().enumerate() {
-                        if *items == **cap {
-                            if let Some(v) = graph.nodes[current.trie_position]
-                                .edge
-                                .get(&GraphTokenVariant::Backref(i))
-                            {
-                                for v in v.iter() {
-                                    v.handle(|v, set_start| {
-                                        let m = PartialMatch {
-                                            start_position: if set_start {
-                                                input.start
-                                            } else {
-                                                current.start_position
-                                            },
-                                            priority_position: current.priority_position,
-                                            trie_position: v,
-                                            capture_stack: current.capture_stack.clone(),
-                                            bracket_state: current
-                                                .bracket_state
-                                                .pass_through_scope_blocking(),
-                                        };
-                                        handle_maybe_full_match(exprs, graph, &m, &input, out);
-                                        handle_partial_match(
-                                            next_matches,
-                                            max_concurrent_matches,
-                                            m,
-                                        );
-                                    });
-                                }
+                    // backref
+                    for (capture_index, dst) in graph.nodes[current.trie_position].backref.iter() {
+                        if *items == *current.capture_stack[*capture_index] {
+                            for dst in dst.iter() {
+                                dst.handle(|v, set_start| {
+                                    let m = PartialMatch {
+                                        start_position: if set_start {
+                                            input.start
+                                        } else {
+                                            current.start_position
+                                        },
+                                        priority_position: current.priority_position,
+                                        trie_position: v,
+                                        capture_stack: current.capture_stack.clone(),
+                                        bracket_state: current
+                                            .bracket_state
+                                            .pass_through_scope_blocking(),
+                                    };
+                                    handle_maybe_full_match(exprs, graph, &m, &input, out);
+                                    handle_partial_match(next_matches, max_concurrent_matches, m);
+                                });
                             }
+                        }
+                    }
 
-                            if let Some(v) = graph.nodes[current.trie_position]
-                                .edge
-                                .get(&GraphTokenVariant::BackrefReplace(i))
-                            {
-                                for v in v.iter() {
-                                    v.handle(|v, set_start| {
-                                        // replace content at position
-                                        let mut new_stack = (*current.capture_stack).clone();
-                                        let last = new_stack.pop().unwrap();
-                                        new_stack[i] = last;
-                                        let new_stack = Arc::new(new_stack);
-                                        let m = PartialMatch {
-                                            start_position: if set_start {
-                                                input.start
-                                            } else {
-                                                current.start_position
-                                            },
-                                            priority_position: current.priority_position,
-                                            trie_position: v,
-                                            capture_stack: new_stack,
-                                            bracket_state: current
-                                                .bracket_state
-                                                .pass_through_scope_blocking(),
-                                        };
-                                        handle_maybe_full_match(exprs, graph, &m, &input, out);
-                                        handle_partial_match(
-                                            next_matches,
-                                            max_concurrent_matches,
-                                            m,
-                                        );
-                                    });
-                                }
+                    // backref replace
+                    for (capture_index, dst) in
+                        graph.nodes[current.trie_position].backref_replace.iter()
+                    {
+                        if *items == *current.capture_stack[*capture_index] {
+                            for dst in dst.iter() {
+                                dst.handle(|v, set_start| {
+                                    // replace content at position
+                                    let mut new_stack = (*current.capture_stack).clone();
+                                    let last = new_stack.pop().unwrap();
+                                    new_stack[*capture_index] = last;
+                                    let new_stack = Arc::new(new_stack);
+                                    let m = PartialMatch {
+                                        start_position: if set_start {
+                                            input.start
+                                        } else {
+                                            current.start_position
+                                        },
+                                        priority_position: current.priority_position,
+                                        trie_position: v,
+                                        capture_stack: new_stack,
+                                        bracket_state: current
+                                            .bracket_state
+                                            .pass_through_scope_blocking(),
+                                    };
+                                    handle_maybe_full_match(exprs, graph, &m, &input, out);
+                                    handle_partial_match(next_matches, max_concurrent_matches, m);
+                                });
                             }
+                        }
+                    }
+
+                    // create replace
+                    for (capture_index, dst) in
+                        graph.nodes[current.trie_position].create_replace.iter()
+                    {
+                        for dst in dst.iter() {
+                            dst.handle(|v, set_start| {
+                                let mut new_stack = (*current.capture_stack).clone();
+                                new_stack[*capture_index] =
+                                    Arc::new(items.to_vec().into_boxed_slice());
+                                let new_stack = Arc::new(new_stack);
+                                let m = PartialMatch {
+                                    start_position: if set_start {
+                                        input.start
+                                    } else {
+                                        current.start_position
+                                    },
+                                    priority_position: current.priority_position,
+                                    trie_position: v,
+                                    capture_stack: new_stack,
+                                    bracket_state: current
+                                        .bracket_state
+                                        .pass_through_scope_blocking(),
+                                };
+                                handle_maybe_full_match(exprs, graph, &m, &input, out);
+                                handle_partial_match(next_matches, max_concurrent_matches, m);
+                            });
                         }
                     }
                 }
