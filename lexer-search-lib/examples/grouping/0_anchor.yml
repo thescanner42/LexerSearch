@@ -1,8 +1,10 @@
 patterns: # "anchor" pattern
-  - >
-    TransportGenerator.create(...)
+  - TransportGenerator.create(...)
+  - $_VAR = TransportGenerator.create(...)
 languages:
   - java
 group:
   name: travel_group
+  match:
+    - _VAR
 name: anchor

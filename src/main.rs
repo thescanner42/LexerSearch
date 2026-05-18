@@ -34,14 +34,13 @@ pub struct Args {
     /// value this will causes non ... sections of a pattern to not match
     #[arg(default_value_t = DEFAULT_MAX_TOKEN_LENGTH)]
     pub max_token_length: NonZeroUsize,
-    /// should be some reasonably small number. specifies the max number of
-    /// simultaneous groups
-    #[arg(default_value_t = 10.try_into().unwrap())]
-    pub max_concurrent_groups: NonZero<usize>,
-    /// should be some reasonably small number. specifies the max number of
-    /// matches per group
-    #[arg(default_value_t = 10.try_into().unwrap())]
-    pub max_group_size: NonZero<usize>,
+    /// the maximum number of matches to store when creating groups
+    #[arg(default_value_t = 50.try_into().unwrap())]
+    pub max_group_memory: NonZero<usize>,
+    /// the maximum number of times that matches can be duplicated when a unique
+    /// match is encountered
+    #[arg(default_value_t = 100.try_into().unwrap())]
+    pub max_group_unique_expansions: NonZero<usize>,
 
     /// emit matcher graph debug information
     #[cfg(not(feature = "embed-patterns"))]
@@ -112,8 +111,8 @@ fn main() -> Result<(), String> {
                             trie,
                             args.max_concurrent_matches,
                             args.max_token_length,
-                            args.max_concurrent_groups,
-                            args.max_group_size,
+                            args.max_group_memory,
+                            args.max_group_unique_expansions,
                         );
 
                         let write_out_finding = |m: FullMatch| {

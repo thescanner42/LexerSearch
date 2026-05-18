@@ -5,7 +5,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn this_is_a_test() {
+    pub fn this_is_a_test() {
         assert_eq!(1, 1);
         assert_eq!(1, 1);
         assert_eq!(1, 1);

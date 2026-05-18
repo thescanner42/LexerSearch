@@ -1,15 +1,15 @@
-patterns: # distance from anchor
+patterns: # color from anchor
   - >
     $_VAR = TransportGenerator.create(...)
     ..}
-    $_VAR.travel($DISTANCE)
+    $_VAR.color($COLOR)
 languages:
   - java
 transform:
-  DISTANCE: ^[0-9]
+  COLOR: ^[a-zA-Z_]
 group:
   name: travel_group
   unique: true
   match:
     - _VAR
-name: distance
+name: color

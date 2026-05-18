@@ -142,15 +142,15 @@ impl<'g> Matcher<'g> {
         graph: &'g Graph,
         max_concurrent_matches: usize,
         max_token_length: NonZero<usize>,
-        max_concurrent_groups: NonZero<usize>,
-        max_group_size: NonZero<usize>,
+        max_group_full_matches: NonZero<usize>,
+        max_group_unique_expansions: NonZero<usize>,
     ) -> Self {
         Self {
             graph: graph,
             matches: Default::default(),
             max_concurrent_matches,
             canonicalizer: Canonicalizer::new(max_token_length),
-            grouper: Grouper::new(max_concurrent_groups, max_group_size),
+            grouper: Grouper::new(max_group_full_matches, max_group_unique_expansions),
             exprs: Default::default(),
         }
     }
@@ -187,7 +187,7 @@ impl<'g> Matcher<'g> {
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
-            let mut grouper = std::mem::take(&mut self.grouper);
+            let mut grouper = std::mem::replace(&mut self.grouper, Grouper::dummy());
             self.step_token(token, |full_match| {
                 grouper.process(full_match, &mut out);
             });
@@ -223,7 +223,7 @@ impl<'g> Matcher<'g> {
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
-            let mut grouper = std::mem::take(&mut self.grouper);
+            let mut grouper = std::mem::replace(&mut self.grouper, Grouper::dummy());
             self.step_token(token, |full_match| {
                 grouper.process(full_match, &mut out);
             });
@@ -262,7 +262,7 @@ impl<'g> Matcher<'g> {
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
-            let mut grouper = std::mem::take(&mut self.grouper);
+            let mut grouper = std::mem::replace(&mut self.grouper, Grouper::dummy());
             self.step_token(token, |full_match| {
                 grouper.process(full_match, &mut out);
             });
