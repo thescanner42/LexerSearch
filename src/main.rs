@@ -16,7 +16,7 @@ use lexer_search_lib::{
         matchers::{Graphs, make_c_like_lexer, make_python_like_lexer, make_rust_like_lexer},
     },
     io::{FullMatchOut, Language, final_postprocess},
-    lexer::DEFAULT_MAX_TOKEN_LENGTH,
+    lexer::{DEFAULT_MAX_CONCURRENT_MATCHES, DEFAULT_MAX_DISTINCT_GROUPS, DEFAULT_MAX_GROUP_MEMORY, DEFAULT_MAX_TOKEN_LENGTH, DEFAULT_MAX_UNIQUE_EXPANSIONS},
 };
 
 #[derive(Parser, Debug)]
@@ -28,18 +28,23 @@ pub struct Args {
     pub patterns_path: PathBuf,
     pub scan_path: PathBuf,
     /// max simultaneous independent overlapping partial matches
-    #[arg(default_value_t = 5000)]
+    #[arg(default_value_t = DEFAULT_MAX_CONCURRENT_MATCHES)]
     pub max_concurrent_matches: usize,
     /// the maximum length of a token. if a token is larger than this specified
     /// value this will causes non ... sections of a pattern to not match
     #[arg(default_value_t = DEFAULT_MAX_TOKEN_LENGTH)]
     pub max_token_length: NonZeroUsize,
-    /// the maximum number of matches to store when creating groups
-    #[arg(default_value_t = 50.try_into().unwrap())]
+    /// when grouping, the maximum number of distinct group name queues that can
+    /// be stored simultaneously
+    #[arg(default_value_t = DEFAULT_MAX_DISTINCT_GROUPS)]
+    pub max_distinct_groups: NonZero<usize>,
+    /// when grouping, the maximum number of matches to store for each group
+    /// name. should be some small value
+    #[arg(default_value_t = DEFAULT_MAX_GROUP_MEMORY)]
     pub max_group_memory: NonZero<usize>,
-    /// the maximum number of times that matches can be duplicated when a unique
-    /// match is encountered
-    #[arg(default_value_t = 100.try_into().unwrap())]
+    /// when grouping, the maximum number of times that matches can be
+    /// duplicated when unique pattern matches are encountered
+    #[arg(default_value_t = DEFAULT_MAX_UNIQUE_EXPANSIONS)]
     pub max_group_unique_expansions: NonZero<usize>,
 
     /// emit matcher graph debug information
@@ -111,6 +116,7 @@ fn main() -> Result<(), String> {
                             trie,
                             args.max_concurrent_matches,
                             args.max_token_length,
+                            args.max_distinct_groups,
                             args.max_group_memory,
                             args.max_group_unique_expansions,
                         );

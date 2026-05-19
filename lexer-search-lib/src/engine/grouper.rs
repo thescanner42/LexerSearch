@@ -11,16 +11,20 @@ struct FullMatchWrapper {
 }
 
 /// it was difficult to write this component
-/// 
+///
 /// the time complexity is O(n^2) but because N is capped it's O(1). the default
 /// cap is small so for smaller workloads this naive linear solution is probably
 /// faster than more complicated solutions that have a better time complexity,
 /// but this isn't ideal if the cap is raised in the future
-/// 
+///
 /// at a later time this can be revisited (maybe slotmap storage + priority
-/// queue dropping + interval tree lookup?)
+/// queue dropping + interval tree lookup?). not clear that more is necessary
 pub struct Grouper {
-    full_matches: VecDeque<FullMatchWrapper>,
+    /// associates the group name with the full match queue -  this gives better
+    /// insulation in case one rule is producing a lot of full matches and
+    /// overwritting a global queue - could drown out and affect other rules
+    full_matches: lru::LruCache<String, VecDeque<FullMatchWrapper>>,
+
     max_full_matches: NonZero<usize>,
     max_unique_expansions: NonZero<usize>,
 }
@@ -102,25 +106,42 @@ impl<'a> UniqueOuts<'a> {
 
 impl Grouper {
     pub fn dummy() -> Self {
-        Grouper::new(1.try_into().unwrap(), 1.try_into().unwrap())
+        Grouper::new(
+            1.try_into().unwrap(),
+            1.try_into().unwrap(),
+            1.try_into().unwrap(),
+        )
     }
 
-    pub fn new(max_full_matches: NonZero<usize>, max_unique_expansions: NonZero<usize>) -> Self {
+    pub fn new(
+        max_distinct_groups: NonZero<usize>,
+        max_full_matches: NonZero<usize>,
+        max_unique_expansions: NonZero<usize>,
+    ) -> Self {
         Self {
-            full_matches: Default::default(),
+            full_matches: lru::LruCache::new(max_distinct_groups),
             max_full_matches,
             max_unique_expansions,
         }
     }
 
     pub fn drain(&mut self, mut out: impl FnMut(FullMatch)) {
-        // O(n^2) but constant since full_matches is capped
-        while let Some(v) = self.full_matches.pop_front() {
-            self.drain_one(v, &mut out);
+        let current = self.full_matches.cap();
+        let taken = std::mem::replace(&mut self.full_matches, lru::LruCache::new(current));
+        for (_evicted_k, mut evicted_v) in taken {
+            // O(n^2) but constant since full_matches is capped
+            while let Some(v) = evicted_v.pop_front() {
+                Self::drain_one(&mut evicted_v, v, &mut out, self.max_unique_expansions);
+            }
         }
     }
 
-    fn drain_one(&mut self, rm: FullMatchWrapper, out: &mut impl FnMut(FullMatch)) {
+    fn drain_one(
+        me: &mut VecDeque<FullMatchWrapper>,
+        rm: FullMatchWrapper,
+        out: &mut impl FnMut(FullMatch),
+        max_unique_expansions: NonZero<usize>,
+    ) {
         if rm.used {
             // dropped. this was already used by a different group. it was
             // marked and not removed right away because other things could have
@@ -131,14 +152,13 @@ impl Grouper {
         let mut rm = rm.inner;
 
         let mut outs = UniqueOuts::new(rm.clone());
-        'outer: for m in self.full_matches.iter_mut() {
+        'outer: for m in me.iter_mut() {
             if m.inner.start.offset > rm.start.offset || m.inner.end.offset < rm.end.offset {
                 continue; // non-applicable span
             }
 
-            if m.inner.group.name != rm.group.name {
-                continue; // non-applicable group
-            }
+            // each queue only has that one group
+            debug_assert!(m.inner.group.name == rm.group.name);
 
             for k in rm.group.r#match.iter() {
                 if let Some(rm_v) = rm.captures.get(k) {
@@ -168,7 +188,7 @@ impl Grouper {
             }
             outs.handle_applicable(&m.inner);
         }
-        outs.drain(out, self.max_unique_expansions);
+        outs.drain(out, max_unique_expansions);
     }
 
     pub fn process(&mut self, m: FullMatch, mut out: impl FnMut(FullMatch)) {
@@ -177,11 +197,31 @@ impl Grouper {
             return;
         }
 
-        if self.full_matches.len() == self.max_full_matches.get() {
+        let full_matches = if let Some(v) = self.full_matches.get_mut(&m.group.name) {
+            v
+        } else {
+            if let Some((evicted_k, mut evicted_v)) = self
+                .full_matches
+                .push(m.group.name.clone(), Default::default())
+            {
+                // this is not a key replace (the key is not already in the
+                // map). this is evicting the least recently used
+                debug_assert!(evicted_k != m.group.name);
+                // O(n^2) but constant since it's capped
+                while let Some(v) = evicted_v.pop_front() {
+                    Self::drain_one(&mut evicted_v, v, &mut out, self.max_unique_expansions);
+                }
+            }
+
+            // unwrap ok since it was just added
+            self.full_matches.get_mut(&m.group.name).unwrap()
+        };
+
+        if full_matches.len() == self.max_full_matches.get() {
             // we are at capacity. must produce a group early based on available
             // info. precondition: full_matches not empty
-            let rm = self.full_matches.pop_front().unwrap();
-            self.drain_one(rm, &mut out);
+            let rm = full_matches.pop_front().unwrap();
+            Self::drain_one(full_matches, rm, &mut out, self.max_unique_expansions);
         }
 
         // room has been made if necessary above
@@ -191,12 +231,12 @@ impl Grouper {
         // ideal receival order is by end position then reverse start position.
         // tried changing this upstream but there's a small performance hit.
         // instead, changing the order here
-        let mut insertion_position = self.full_matches.len();
+        let mut insertion_position = full_matches.len();
         loop {
             if insertion_position == 0 {
                 break;
             }
-            let prev = &self.full_matches[insertion_position - 1];
+            let prev = &full_matches[insertion_position - 1];
             if prev.inner.end.offset != m.end.offset {
                 // very likely
                 //
@@ -209,7 +249,7 @@ impl Grouper {
             }
             insertion_position -= 1;
         }
-        self.full_matches.insert(
+        full_matches.insert(
             insertion_position,
             FullMatchWrapper {
                 inner: m,

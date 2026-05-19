@@ -1,6 +1,6 @@
 [package]
 name = "lexer-search-lib"
-version = "3.2.1"
+version = "3.2.2"
 edition = "2024"
 
 [dependencies]
@@ -13,6 +13,7 @@ walkdir = "2.5.0"
 rayon = { version = "1.10", optional = true }
 blake3 = "1.8.5"
 rand = "0.10.1"
+lru = "0.18.0"
 
 [features]
 default = []

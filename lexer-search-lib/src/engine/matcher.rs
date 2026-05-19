@@ -142,6 +142,7 @@ impl<'g> Matcher<'g> {
         graph: &'g Graph,
         max_concurrent_matches: usize,
         max_token_length: NonZero<usize>,
+        max_distinct_groups: NonZero<usize>,
         max_group_full_matches: NonZero<usize>,
         max_group_unique_expansions: NonZero<usize>,
     ) -> Self {
@@ -150,7 +151,7 @@ impl<'g> Matcher<'g> {
             matches: Default::default(),
             max_concurrent_matches,
             canonicalizer: Canonicalizer::new(max_token_length),
-            grouper: Grouper::new(max_group_full_matches, max_group_unique_expansions),
+            grouper: Grouper::new(max_distinct_groups, max_group_full_matches, max_group_unique_expansions),
             exprs: Default::default(),
         }
     }
