@@ -58,7 +58,7 @@ of the captured token.
 - string literal -> `".*"`
 
 The first time a capture with a new name is written in a pattern is the creation
-of that capture; the captured token is remebered and can be referred to later.
+of that capture; the captured token is remembered and can be referred to later.
 Subsequent mentions of that same capture only allow the pattern to match if the
 capture content also matches. For pattern `$ABC $ABC` the first is the capture
 creation and the second is a backreference to the created capture `ABC`:
