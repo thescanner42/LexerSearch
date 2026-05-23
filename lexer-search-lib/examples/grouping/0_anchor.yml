@@ -1,4 +1,4 @@
-patterns: # "anchor" pattern
+patterns: # "anchor" pattern - has small span intersection
   - TransportGenerator.create(...)
   - $_VAR = TransportGenerator.create(...)
 languages:

@@ -1,0 +1,2 @@
+{"file":"test.rs","start":{"offset":4,"column":5,"line":1},"end":{"offset":35,"column":15,"line":3},"name":"transform_regex","captures":{"FIRST":"TEST","SECOND":"123","STR":"\"TEST-123\"","VAR":"v","literal_key":"literal_value"}}
+{"file":"test.rs","start":{"offset":37,"column":1,"line":5},"end":{"offset":59,"column":23,"line":5},"name":"transform_regex","captures":{"FIRST":"ABC","SECOND":"123","STR":"\"ABC-123\"","literal_key":"literal_value"}}

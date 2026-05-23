@@ -1,8 +1,8 @@
 use std::{collections::HashMap, num::NonZero};
 
-use crate::engine::graph::{
-    GraphBuilder, GraphBuilderNode, GraphTokenVariant, PatternInfo, SetStartEnum,
-};
+use crate::engine::{graph::{
+    GraphBuilder, GraphBuilderNode, GraphTokenVariant, PatternInfo,
+}, span::SetSpan};
 
 #[test]
 fn graph_builder_simple_abc() {
@@ -32,21 +32,21 @@ fn graph_builder_simple_abc() {
     let node1 = GraphBuilderNode {
         edge: HashMap::from([(
             GraphTokenVariant::Captureable(vec![b'a'].into_boxed_slice()),
-            SetStartEnum::No(1),
+            SetSpan::from(1, false, false),
         )]),
         ..Default::default()
     };
     let node2 = GraphBuilderNode {
         edge: HashMap::from([(
             GraphTokenVariant::Captureable(vec![b'b'].into_boxed_slice()),
-            SetStartEnum::No(2),
+            SetSpan::from(2, false, false),
         )]),
         ..Default::default()
     };
     let node3 = GraphBuilderNode {
         edge: HashMap::from([(
             GraphTokenVariant::Captureable(vec![b'c'].into_boxed_slice()),
-            SetStartEnum::No(3),
+            SetSpan::from(3, false, false),
         )]),
         ..Default::default()
     };
@@ -110,7 +110,7 @@ fn graph_builder_simple_dedup() {
     let node1 = GraphBuilderNode {
         edge: HashMap::from([(
             GraphTokenVariant::Captureable(vec![b'a'].into_boxed_slice()),
-            SetStartEnum::No(1),
+            SetSpan::from(1, false, false),
         )]),
         ..Default::default()
     };
@@ -118,11 +118,11 @@ fn graph_builder_simple_dedup() {
         edge: HashMap::from([
             (
                 GraphTokenVariant::Captureable(vec![b'b'].into_boxed_slice()),
-                SetStartEnum::No(2),
+                SetSpan::from(2, false, false),
             ),
             (
                 GraphTokenVariant::Captureable(vec![b'c'].into_boxed_slice()),
-                SetStartEnum::No(3),
+                SetSpan::from(3, false, false),
             ),
         ]),
         ..Default::default()

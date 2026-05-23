@@ -96,12 +96,11 @@ pub enum RepititionTokenVariant {
     Curly,
     ScopeBlocking,
     StatementBlocking,
-    SetStart,
 
     NonCapturingCapture,
     Backref(usize),
     CreateCapture,
-    BackrefReplace(usize),
+    PopReplace(usize),
     CreateReplace(usize),
 }
 
@@ -133,7 +132,6 @@ impl RepititionTokenVariant {
             RepititionTokenVariant::Curly => out.push(7),
             RepititionTokenVariant::ScopeBlocking => out.push(8),
             RepititionTokenVariant::StatementBlocking => out.push(9),
-            RepititionTokenVariant::SetStart => out.push(10),
 
             RepititionTokenVariant::NonCapturingCapture => {
                 out.push(11);
@@ -143,7 +141,7 @@ impl RepititionTokenVariant {
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             }
             RepititionTokenVariant::CreateCapture => out.push(13),
-            RepititionTokenVariant::BackrefReplace(v) => {
+            RepititionTokenVariant::PopReplace(v) => {
                 out.push(14);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             },

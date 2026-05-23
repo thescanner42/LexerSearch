@@ -165,8 +165,9 @@ a
 c
 ```
 
-However this flow of information is blocked by ellipsis not contained in
-brackets, e.g. `a ..} b ... c ..} d`.
+This flow of information is deliberately blocked by ellipsis not contained in
+brackets (as this could represent any change in lexical level), e.g. `a ..} b
+... c ..} d`.
 
 #### Statement Blocking
 
@@ -180,14 +181,15 @@ $NUM = ..! 5 ..! ;
 
 The `..!` operator is very similar to the scope blocking ellipsis: it will not escape the current lexical scope.
 
-However, it also will not exit the current statement: it cannot go past a ';' not in a nested lexical scope.
+However, it also will not exit the current statement; it cannot go past a ';' not in a nested lexical scope.
 
 Its state is reset when reaching `...` or `..}`, (which are both intended to be
 used between statements).
 
 ## Repetitions
 
-Looping is provided via the `..*` operator. For example:
+Looping is provided via the `..*` operator; the section surround by `..*` is
+matched zero or more times. For example this detects test functions in rust:
 
 ```
 #[test] // annotation
@@ -198,8 +200,6 @@ Looping is provided via the `..*` operator. For example:
 fn $_F(...) {...} // fn
 ```
 
-The section surround by `..*` is matched zero or more times.
-
 The total number of captures created in a repitition section must equal zero.
 
 For example, the non-capture `$_` can be stated any number of times since it
@@ -208,36 +208,37 @@ does not create captures.
 
 ### Multi-repetition
 
-The pattern `..* a ..* ..* b ..*` matches the following example inputs:
+The pattern `start ..* a ..* ..* b ..* end` matches the following example inputs:
 
-- `a a a a`
-- `b b b b`
-- `a a b b`
+- `start a a a a end`
+- `start b b b b end`
+- `start a a b b end`
 
 The two repitition sections are executed "in series" - the `a`'s must proceed
 the `b`'s. However, there are cases where the repititions should instead be
 executed in parallel.
 
 A repitition section can be separated with `..|`, indicating that it contains
-multiple patterns. In addition to the above examples, `..* a ..| b ..*` will
-also match `b a b a`.
+multiple patterns.
+
+In addition to the above examples, `start ..* a ..| b ..* end` will match:
+
+- `start b a b a end`
 
 ### Replace
 
-Inside a repitition section a capture replace can be used.
+Inside a repitition section a capture replace can be used. It is written with a
+percent prefix like `%ABC`. It overwrites an existing capture.
 
-It is written with a percent prefix like `%ABC`. It must backreference an
-existing capture, and is used to overwrite the contents of a capture that was
-previously stored (the "destination"). The source to use when replacing the
-capture is based on one of two scenarios:
+It's intended for use in propagating a pattern from a source to a sink, with
+some number of assignment patterns in between. Recall that the number of
+captures created in a repitition is only allowed to sum to zero, otherwise a
+pattern's memory usage could increase with each time the repitition is used!
+However it is ok to simply replace an existing capture.
 
-#### Backreference Replace
+There are two variants:
 
-If a different previous capture was created in the same repitition section, then
-it first backreferences to its own capture, and if it matches, it then takes the
-content of that previous capture to set the destination. After the previous
-capture is taken, it's as if the previous  capture was never created in the
-first place.
+#### Pop Replace
 
 For example:
 
@@ -248,14 +249,24 @@ $X = ..! source ..! ;
 sink($X)
 ```
 
-`$NEWX` is created in the repitition. `%X` checks that its token matches the
-same one captured at `$X`, then takes the token captured by `$NEWX` and puts it
-into `$X`.
+Matches:
 
-#### Create Capture Replace
+```rust
+x = source;
+x2 = x;
+sink(x);
+```
 
-If no captures are created in the repitition section, then the source is
-whatever capture-able token is received as input from the source code.
+In the example, `%X`:
+
+- checks that the token it receives is equal to that which is captured earlier in
+  the pattern by `$X`, then,
+- since a different capture (`$NEWX`) was created in the same repitition
+  section, `%X` takes the last created capture (`$NEWX`)'s content and puts it
+  into `$X`. Since `$NEWX` was taken, after `%X` it's as if it was never created
+  and can't be referenced
+
+#### Create Replace
 
 For example:
 
@@ -266,14 +277,18 @@ $X = ..! source ..! ;
 sink($X)
 ```
 
-No new capture was created in the repitition (note that `$X` is a backreference
-since it was created previously). `%X` sets its content to the capture-able
-token it receives, replacing `$X`.
+In this example, no new capture was created in the repitition (note that `$X` in
+the repitition is a backreference since `$X` was created previously). `%X` sets
+its content to the capture-able token it receives, replacing `$X`.
 
-## Set Start
+> [!TIP]  
+> Create replace can also be stated outside of repitition sections to replace an
+> existing capture.
 
-The `..^` operator overwrites the start of the match's span. For example
-pattern:
+## Set Span
+
+The `..^` and `..$` operators overwrite the start and end of the match's span,
+respectively. For example pattern:
 
 ```
 import abc
@@ -286,8 +301,21 @@ import abc
 abc.something(123)
 ```
 
-The `..^` operator should only be placed before non-reflexive transitions. e.g.
-not `..^ ...`.
+`..^` applies to the next token in the pattern, and `..$` applies to the
+previous. For example, `abc ..^ def ..$ ghi` will set the span to include only
+`def`.
+
+These operators must not be applied in repitition sections nor around
+reflexive transitions, e.g. `a ... ..^ b` instead of `a ..^ ... b`.
+
+> [!WARNING]  
+> LexerSearch uses constant memory with respect to the scan input and this
+> yields a tradeoff - it maintains a configurable maximum number of independent
+> partial ("candidate") matches. if many independent partial matches are created
+> then the ones with an earlier start position are forgotten.
+>
+> try to avoid patterns which have a very large match span, and try to write
+> patterns which share common prefixes where possible.
 
 ## Embed Patterns
 
@@ -388,7 +416,8 @@ output values which are otherwise not producible from the matched snippet.
 # Name
 
 The name field is used to identify which pattern a match is from. The
-combination of the name and [group](#group) should be unique for each pattern.
+combination of the name and [group name](#group) should be unique for each
+pattern.
 
 ```yaml
 patterns:
@@ -433,7 +462,7 @@ useful than when they are known to apply together. The solution to this is to
 use a group:
 
 ```yaml
-patterns: # "anchor" pattern
+patterns: # "anchor" pattern - small intersection match span
   - >
     TransportGenerator.create(...)
 languages:
@@ -485,25 +514,35 @@ The above rules together produce a single match:
 }
 ```
 
-The matches are merged into the same finding when:
-- the user stated group name is the same
-- between the incoming match and the intersection of the matches already in the
-  finding, the span of one must cover the other
+The matches are merged into the same finding when the user stated group name is
+the same and the match span of the anchor pattern is completely covered by the
+span of the other matches.
 
 This on its own is not enough to prevent merging of unrelated matches, as there
 could be overlapping matches with patterns of unrelated variables. `group.match`
-is a list of variables names whose captured content must match for the findings
+is a list of variable names whose captured content must match for the findings
 to be merged.
 
-By default, if a match being merged has the same name as an existing match, then
-the new match replaces the old match, and the old match is discarded. This
-better models cases like variable redeclaration / shadowing. However, if
-`group.unique` is true, then this instead forks the finding - both are sent to
-the output.
+By default, if a match being merged has the same name (not to be confused with
+the group name) as an existing match, then the new match replaces the old match,
+and the old match is discarded. This better models cases like variable
+redeclaration / shadowing. However, if `group.unique` is true, then this instead
+forks the finding - both are sent to the output.
 
-Lastly, a match can be cancelled by setting `group.cancel` to true; when merging
-with other matches it causes the result to be discarded. This allows, for
-example, detection of a pattern not contained in a different pattern.
+A match can be cancelled by setting `group.cancel` to true; when merging with
+other matches it causes the result to be discarded. This allows, for example,
+detection of a pattern not contained in a different pattern.
+
+The span of the output match is the union of the match spans within that group.
+However if the span is overriden by the anchor pattern via `..^` or `..$` then
+it will take priority.
+
+> [!WARNING]  
+> the current implementation for grouping has a small but configurable memory
+> limit per group name. this means if a group produces many matches it could
+> cause matches to incorrectly not be associated (since earlier matches will be
+> forgotten). to avoid this, where possible ensure that the end position of
+> matches in the same group occur in a similar position.
 
 # Examples
 

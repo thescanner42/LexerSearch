@@ -613,6 +613,7 @@ impl super::Lexer for Lexer {
                             || byte == b'!'
                             || byte == b'|'
                             || byte == b'^'
+                            || byte == b'$'
                         {
                             self.state = LexerEnum::NotLineStart;
                             let t = match byte {
@@ -625,6 +626,7 @@ impl super::Lexer for Lexer {
                                 b'*' => EllipsisEnum::Jump,
                                 b'|' => EllipsisEnum::JumpSep,
                                 b'^' => EllipsisEnum::SetStart,
+                                b'$' => EllipsisEnum::SetEnd,
                                 _ => unreachable!(),
                             };
                             return Ok(Some(ret_token(self, LexerTokenVariant::Ellipsis(t))));

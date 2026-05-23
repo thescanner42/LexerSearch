@@ -130,6 +130,8 @@ pub enum EllipsisEnum {
     JumpSep,
     /// ..^
     SetStart,
+    /// ..$
+    SetEnd,
 }
 
 /// reference to token emitted by lexer

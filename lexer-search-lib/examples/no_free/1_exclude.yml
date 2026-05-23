@@ -6,8 +6,8 @@ patterns:
 name: exclude
 group:
   name: malloc_no_free
-  match:
-    - _VAR
+  # match: # no need to state in non-anchor pattern
+  #   - _VAR
   cancel: true
 languages:
   - c

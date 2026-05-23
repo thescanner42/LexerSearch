@@ -9,8 +9,6 @@ patterns:
   sink($X)
 name: negative
 group:
-  match:
-    - X
   name: source_sanitizer_sink
   cancel: true
 languages:

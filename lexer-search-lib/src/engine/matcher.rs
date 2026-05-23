@@ -8,9 +8,10 @@ use std::{
 use crate::{
     engine::{
         canonicalizer::Canonicalizer,
-        graph::{Graph, GraphNodeEllipsisEnum, GraphTokenVariant, GroupInfo},
+        graph::{Graph, GraphTokenVariant, GroupInfo},
         grouper::Grouper,
         regex_cache::RegexCache,
+        span::EllipsisInfoHandleEnum,
         token::{Token, TokenVariant},
     },
     lexer::{Lexer, Position},
@@ -41,9 +42,21 @@ impl PartialMatchBracketState {
 pub struct PartialMatch {
     /// byte offset in input
     ///
-    /// original start offset in file, nor overriden by ..^
-    pub priority_position: usize,
-    pub start_position: Position,
+    /// original start offset in file, nor overridden by ..^
+    ///
+    /// this is used to determine drop priority for max concurrent partial
+    /// matches
+    pub original_start_position: usize,
+    /// visual, influence by ..^
+    pub visual_start_position: Position,
+    /// was the visual start position set by ..^
+    pub visual_start_position_overridden: bool,
+
+    // visual, influenced by ..$
+    //
+    // Some if it was set by ..$, None otherwise
+    pub visual_end_position: Option<Position>,
+
     pub trie_position: usize,
 
     pub bracket_state: PartialMatchBracketState,
@@ -57,15 +70,15 @@ pub struct PartialMatch {
 impl PartialMatch {
     fn new(start_position: Position) -> Self {
         let mut ret: PartialMatch = Default::default();
-        ret.start_position = start_position;
-        ret.priority_position = start_position.offset;
+        ret.visual_start_position = start_position;
+        ret.original_start_position = start_position.offset;
         ret
     }
 }
 
 impl PartialEq for PartialMatch {
     fn eq(&self, other: &Self) -> bool {
-        self.priority_position == other.priority_position
+        self.original_start_position == other.original_start_position
     }
 }
 
@@ -80,14 +93,32 @@ impl PartialOrd for PartialMatch {
 impl Ord for PartialMatch {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering so BinaryHeap pops smallest start_position
-        other.priority_position.cmp(&self.priority_position)
+        other
+            .original_start_position
+            .cmp(&self.original_start_position)
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, serde::Serialize)]
 pub struct FullMatch {
+    /// visual
     pub start: Position,
+    /// was the visual start position set by ..^
+    #[serde(skip)]
+    pub visual_start_position_overridden: bool,
+
+    #[serde(skip)]
+    pub actual_start_offset: usize,
+
+    /// visual
     pub end: Position,
+    /// was the visual start position set by ..$
+    #[serde(skip)]
+    pub visual_end_position_overridden: bool,
+
+    #[serde(skip)]
+    pub actual_end_offset: usize,
+
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(skip_serializing_if = "GroupInfo::is_default")]
@@ -151,7 +182,11 @@ impl<'g> Matcher<'g> {
             matches: Default::default(),
             max_concurrent_matches,
             canonicalizer: Canonicalizer::new(max_token_length),
-            grouper: Grouper::new(max_distinct_groups, max_group_full_matches, max_group_unique_expansions),
+            grouper: Grouper::new(
+                max_distinct_groups,
+                max_group_full_matches,
+                max_group_unique_expansions,
+            ),
             exprs: Default::default(),
         }
     }
@@ -305,9 +340,27 @@ impl<'g> Matcher<'g> {
                 out: &mut impl FnMut(FullMatch),
             ) {
                 'outer: for full_match in graph.nodes[element.trie_position].full_match.iter() {
+                    let actual_start_offset = element.original_start_position;
+                    let actual_end_offset = last_token.end.offset;
+
+                    let mut visual_start = element.visual_start_position;
+                    let mut visual_end = match element.visual_end_position {
+                        Some(v) => v,
+                        None => last_token.end,
+                    };
+                    // the start and end can be set arbitrarily - make sure the
+                    // span is valid
+                    if visual_end.offset < visual_start.offset {
+                        std::mem::swap(&mut visual_start, &mut visual_end);
+                    }
+
                     out(FullMatch {
-                        start: element.start_position,
-                        end: last_token.end,
+                        actual_start_offset: actual_start_offset,
+                        visual_start_position_overridden: element.visual_start_position_overridden,
+                        visual_end_position_overridden: element.visual_end_position.is_some(),
+                        start: visual_start,
+                        actual_end_offset: actual_end_offset,
+                        end: visual_end,
                         name: full_match.name.clone(),
                         group: full_match.group.clone(),
                         captures: {
@@ -378,23 +431,30 @@ impl<'g> Matcher<'g> {
                     // non-capture transition
                     let bracket_state = current.bracket_state.pass_through_scope_blocking();
                     for v in graph.nodes[current.trie_position].non_capture.iter() {
-                        v.handle(|index, set_start| {
+                        v.handle(|index, set_start, set_end| {
                             let new_start_position = if set_start {
                                 input.start
                             } else {
-                                current.start_position
+                                current.visual_start_position
                             };
+                            let new_end_position = if set_end { Some(input.end) } else { None };
 
                             let m = PartialMatch {
-                                start_position: new_start_position,
-                                priority_position: current.priority_position,
+                                visual_start_position: new_start_position,
+                                visual_end_position: new_end_position,
+                                original_start_position: current.original_start_position,
                                 trie_position: index,
                                 capture_stack: current.capture_stack.clone(),
                                 bracket_state,
+                                visual_start_position_overridden: current
+                                    .visual_start_position_overridden
+                                    | set_start,
                             };
                             handle_maybe_full_match(exprs, graph, &m, &input, out);
                             handle_partial_match(next_matches, max_concurrent_matches, m);
-                        });
+                            Ok(())
+                        })
+                        .unwrap();
                     }
 
                     // capture transition
@@ -402,78 +462,105 @@ impl<'g> Matcher<'g> {
                         let mut new_stack = (*current.capture_stack).clone();
                         new_stack.push(Arc::new(items.to_vec().into_boxed_slice()));
                         let new_stack = Arc::new(new_stack);
-                        v.handle(|index, set_start| {
+                        v.handle(|index, set_start, set_end| {
                             let new_start_position = if set_start {
                                 input.start
                             } else {
-                                current.start_position
+                                current.visual_start_position
                             };
+                            let new_end_position = if set_end { Some(input.end) } else { None };
 
                             let m = PartialMatch {
-                                start_position: new_start_position,
-                                priority_position: current.priority_position,
+                                visual_start_position: new_start_position,
+                                visual_end_position: new_end_position,
+                                original_start_position: current.original_start_position,
                                 trie_position: index,
                                 capture_stack: new_stack.clone(), // rc
                                 bracket_state,
+                                visual_start_position_overridden: current
+                                    .visual_start_position_overridden
+                                    | set_start,
                             };
                             handle_maybe_full_match(exprs, graph, &m, &input, out);
                             handle_partial_match(next_matches, max_concurrent_matches, m);
-                        });
+                            Ok(())
+                        })
+                        .unwrap();
                     }
 
                     // backref
                     for (capture_index, dst) in graph.nodes[current.trie_position].backref.iter() {
                         if *items == *current.capture_stack[*capture_index] {
                             for dst in dst.iter() {
-                                dst.handle(|v, set_start| {
+                                dst.handle(|v, set_start, set_end| {
                                     let m = PartialMatch {
-                                        start_position: if set_start {
+                                        visual_start_position: if set_start {
                                             input.start
                                         } else {
-                                            current.start_position
+                                            current.visual_start_position
                                         },
-                                        priority_position: current.priority_position,
+                                        visual_end_position: if set_end {
+                                            Some(input.end)
+                                        } else {
+                                            current.visual_end_position
+                                        },
+                                        original_start_position: current.original_start_position,
                                         trie_position: v,
                                         capture_stack: current.capture_stack.clone(),
                                         bracket_state: current
                                             .bracket_state
                                             .pass_through_scope_blocking(),
+                                        visual_start_position_overridden: current
+                                            .visual_start_position_overridden
+                                            | set_start,
                                     };
                                     handle_maybe_full_match(exprs, graph, &m, &input, out);
                                     handle_partial_match(next_matches, max_concurrent_matches, m);
-                                });
+                                    Ok(())
+                                })
+                                .unwrap();
                             }
                         }
                     }
 
                     // backref replace
                     for (capture_index, dst) in
-                        graph.nodes[current.trie_position].backref_replace.iter()
+                        graph.nodes[current.trie_position].pop_replace.iter()
                     {
                         if *items == *current.capture_stack[*capture_index] {
                             for dst in dst.iter() {
-                                dst.handle(|v, set_start| {
+                                dst.handle(|v, set_start, set_end| {
                                     // replace content at position
                                     let mut new_stack = (*current.capture_stack).clone();
                                     let last = new_stack.pop().unwrap();
                                     new_stack[*capture_index] = last;
                                     let new_stack = Arc::new(new_stack);
                                     let m = PartialMatch {
-                                        start_position: if set_start {
+                                        visual_start_position: if set_start {
                                             input.start
                                         } else {
-                                            current.start_position
+                                            current.visual_start_position
                                         },
-                                        priority_position: current.priority_position,
+                                        visual_end_position: if set_end {
+                                            Some(input.end)
+                                        } else {
+                                            current.visual_end_position
+                                        },
+                                        original_start_position: current.original_start_position,
                                         trie_position: v,
                                         capture_stack: new_stack,
                                         bracket_state: current
                                             .bracket_state
                                             .pass_through_scope_blocking(),
+                                        visual_start_position_overridden: current
+                                            .visual_start_position_overridden
+                                            | set_start,
                                     };
                                     handle_maybe_full_match(exprs, graph, &m, &input, out);
                                     handle_partial_match(next_matches, max_concurrent_matches, m);
-                                });
+                                    Ok(())
+                                })
+                                .unwrap();
                             }
                         }
                     }
@@ -483,27 +570,37 @@ impl<'g> Matcher<'g> {
                         graph.nodes[current.trie_position].create_replace.iter()
                     {
                         for dst in dst.iter() {
-                            dst.handle(|v, set_start| {
+                            dst.handle(|v, set_start, set_end| {
                                 let mut new_stack = (*current.capture_stack).clone();
                                 new_stack[*capture_index] =
                                     Arc::new(items.to_vec().into_boxed_slice());
                                 let new_stack = Arc::new(new_stack);
                                 let m = PartialMatch {
-                                    start_position: if set_start {
+                                    visual_start_position: if set_start {
                                         input.start
                                     } else {
-                                        current.start_position
+                                        current.visual_start_position
                                     },
-                                    priority_position: current.priority_position,
+                                    visual_end_position: if set_end {
+                                        Some(input.end)
+                                    } else {
+                                        current.visual_end_position
+                                    },
+                                    original_start_position: current.original_start_position,
                                     trie_position: v,
                                     capture_stack: new_stack,
                                     bracket_state: current
                                         .bracket_state
                                         .pass_through_scope_blocking(),
+                                    visual_start_position_overridden: current
+                                        .visual_start_position_overridden
+                                        | set_start,
                                 };
                                 handle_maybe_full_match(exprs, graph, &m, &input, out);
                                 handle_partial_match(next_matches, max_concurrent_matches, m);
-                            });
+                                Ok(())
+                            })
+                            .unwrap();
                         }
                     }
                 }
@@ -532,23 +629,33 @@ impl<'g> Matcher<'g> {
                 if let Some(literal) = literal {
                     if let Some(v) = graph.nodes[current.trie_position].edge.get(&literal) {
                         for v in v {
-                            v.handle(|v, set_start| {
+                            v.handle(|v, set_start, set_end| {
                                 let m = PartialMatch {
-                                    start_position: if set_start {
+                                    visual_start_position: if set_start {
                                         input.start
                                     } else {
-                                        current.start_position
+                                        current.visual_start_position
                                     },
-                                    priority_position: current.priority_position,
+                                    visual_end_position: if set_end {
+                                        Some(input.end)
+                                    } else {
+                                        current.visual_end_position
+                                    },
+                                    original_start_position: current.original_start_position,
                                     trie_position: v,
                                     capture_stack: current.capture_stack.clone(), // rc
                                     bracket_state: current
                                         .bracket_state
                                         .pass_through_scope_blocking(),
+                                    visual_start_position_overridden: current
+                                        .visual_start_position_overridden
+                                        | set_start,
                                 };
                                 handle_maybe_full_match(exprs, graph, &m, &input, out);
                                 handle_partial_match(next_matches, max_concurrent_matches, m);
-                            });
+                                Ok(())
+                            })
+                            .unwrap();
                         }
                     }
                 }
@@ -615,66 +722,46 @@ impl<'g> Matcher<'g> {
                 handle_partial_match(next_matches, max_concurrent_matches, next);
             }
 
-            match &graph.nodes[current.trie_position].ellipsis {
-                GraphNodeEllipsisEnum::None => {}
-                GraphNodeEllipsisEnum::UncontainedAndCorner(uncontained_items, corner_items) => {
-                    // uncontained ellipsis doesn't care about not too long and not too short rules
-                    for v in uncontained_items {
-                        let mut next = current.clone();
-                        next.bracket_state = Default::default();
-                        next.trie_position = *v;
-                        handle_partial_match(next_matches, max_concurrent_matches, next);
-                    }
+            graph.nodes[current.trie_position]
+                .ellipsis
+                .handle(|dst, bracket_type| {
+                    let (up_char, down_char) = match bracket_type {
+                        EllipsisInfoHandleEnum::Uncontained => {
+                            // uncontained ellipsis doesn't care about not too long and not too short rules
+                            let mut next = current.clone();
+                            next.bracket_state = Default::default();
+                            next.trie_position = dst;
+                            handle_partial_match(next_matches, max_concurrent_matches, next);
+                            return;
+                        }
+                        EllipsisInfoHandleEnum::Round => (b'(', b')'),
+                        EllipsisInfoHandleEnum::Square => (b'[', b']'),
+                        EllipsisInfoHandleEnum::Curly => (b'{', b'}'),
+                        EllipsisInfoHandleEnum::Corner => (b'<', b'>'),
+                    };
 
                     let depth_delta: i32 = match input.variant {
-                        TokenVariant::Byte(b'<') => 1,
-                        TokenVariant::Byte(b'>') => -1,
+                        TokenVariant::Byte(i) => {
+                            if i == up_char {
+                                1
+                            } else if i == down_char {
+                                -1
+                            } else {
+                                0
+                            }
+                        }
                         _ => 0,
                     };
+
                     if let Some(new_depth) =
                         current.bracket_state.depth.checked_add_signed(depth_delta)
                     {
-                        for v in corner_items {
-                            let mut next = current.clone();
-                            next.bracket_state.depth = new_depth;
-                            next.trie_position = *v;
-                            handle_partial_match(next_matches, max_concurrent_matches, next);
-                        }
+                        let mut next = current.clone();
+                        next.bracket_state.depth = new_depth;
+                        next.trie_position = dst;
+                        handle_partial_match(next_matches, max_concurrent_matches, next);
                     }
-                }
-                GraphNodeEllipsisEnum::Round(items)
-                | GraphNodeEllipsisEnum::Square(items)
-                | GraphNodeEllipsisEnum::Curly(items) => {
-                    let depth_delta: i32 = match &graph.nodes[current.trie_position].ellipsis {
-                        GraphNodeEllipsisEnum::Round(_) => match input.variant {
-                            TokenVariant::Byte(b'(') => 1,
-                            TokenVariant::Byte(b')') => -1,
-                            _ => 0,
-                        },
-                        GraphNodeEllipsisEnum::Square(_) => match input.variant {
-                            TokenVariant::Byte(b'[') => 1,
-                            TokenVariant::Byte(b']') => -1,
-                            _ => 0,
-                        },
-                        GraphNodeEllipsisEnum::Curly(_) => match input.variant {
-                            TokenVariant::Byte(b'{') => 1,
-                            TokenVariant::Byte(b'}') => -1,
-                            _ => 0,
-                        },
-                        _ => unreachable!(),
-                    };
-                    if let Some(new_depth) =
-                        current.bracket_state.depth.checked_add_signed(depth_delta)
-                    {
-                        for v in items {
-                            let mut next = current.clone();
-                            next.bracket_state.depth = new_depth;
-                            next.trie_position = *v;
-                            handle_partial_match(next_matches, max_concurrent_matches, next);
-                        }
-                    }
-                }
-            }
+                });
         }
 
         for m in std::mem::take(&mut self.matches).into_iter() {

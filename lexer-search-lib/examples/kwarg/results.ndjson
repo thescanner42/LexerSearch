@@ -1,0 +1,1 @@
+{"file":"test.py","start":{"offset":0,"column":1,"line":1},"end":{"offset":25,"column":20,"line":2},"name":"py_kwarg_example","captures":{"ABC":"5","V":"var"}}

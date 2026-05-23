@@ -1,0 +1,1 @@
+{"file":"test.c","start":{"offset":124,"column":5,"line":7},"end":{"offset":134,"column":15,"line":7},"name":"double_free"}

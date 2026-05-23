@@ -1,0 +1,5 @@
+{"file":"test.java","start":{"offset":0,"column":1,"line":1},"end":{"offset":252,"column":21,"line":7},"name":"travel_group","captures":{"COLOR":"red","DISTANCE":"100","METHOD":"bicycle"}}
+{"file":"test.java","start":{"offset":0,"column":1,"line":1},"end":{"offset":252,"column":21,"line":7},"name":"travel_group","captures":{"COLOR":"red","DISTANCE":"200","METHOD":"bicycle"}}
+{"file":"test.java","start":{"offset":0,"column":1,"line":1},"end":{"offset":275,"column":22,"line":8},"name":"travel_group","captures":{"COLOR":"blue","DISTANCE":"100","METHOD":"bicycle"}}
+{"file":"test.java","start":{"offset":0,"column":1,"line":1},"end":{"offset":275,"column":22,"line":8},"name":"travel_group","captures":{"COLOR":"blue","DISTANCE":"200","METHOD":"bicycle"}}
+{"file":"test.java","start":{"offset":0,"column":1,"line":1},"end":{"offset":299,"column":22,"line":10},"name":"travel_group","captures":{"COLOR":"red","METHOD":"bicycle"}}

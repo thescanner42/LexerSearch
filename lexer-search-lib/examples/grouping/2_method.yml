@@ -14,5 +14,3 @@ transform:
   _EXP: "^\"(?<METHOD>.*)\"$"
 group:
   name: travel_group
-  match:
-    - _VAR

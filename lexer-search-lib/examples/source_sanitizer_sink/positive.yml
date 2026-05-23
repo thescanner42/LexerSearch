@@ -3,7 +3,7 @@ patterns:
   $X = ..! source ..! ;
   ..}
   ..* $NEWX = ..! %X ..! ; ..} ..*
-  sink($X)
+  ..^ sink ..$ ($X)
 name: positive
 group:
   match:

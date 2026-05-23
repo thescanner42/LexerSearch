@@ -10,6 +10,4 @@ transform:
 group:
   name: travel_group
   unique: true
-  match:
-    - _VAR
 name: distance

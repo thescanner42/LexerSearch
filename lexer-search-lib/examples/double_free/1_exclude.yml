@@ -20,8 +20,8 @@ patterns:
 name: exclude
 group:
   name: double_free
-  match:
-    - _VAR
+  # match: # no need to state in non-anchor pattern
+  #   - _VAR
   cancel: true
 languages:
   - c

@@ -5,6 +5,7 @@ use std::{
 
 use crate::engine::matcher::FullMatch;
 
+#[derive(Debug, Clone)]
 struct FullMatchWrapper {
     inner: FullMatch,
     used: bool,
@@ -29,42 +30,46 @@ pub struct Grouper {
     max_unique_expansions: NonZero<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct UniqueOuts<'a> {
-    start: FullMatch,
     unique_rules: HashMap<&'a str, Vec<&'a FullMatch>>,
 }
 
 impl<'a> UniqueOuts<'a> {
-    pub fn new(start: FullMatch) -> Self {
-        Self {
-            start,
-            unique_rules: Default::default(),
+    fn apply(o: &mut FullMatchWrapper, m: &FullMatch) {
+        if o.inner.group.unique && o.inner.group.name == m.group.name {
+            return;
         }
+        o.inner.captures.extend(m.captures.clone());
+        // visual span should be the union of applicable elements but prioritize the span override
+        if !o.inner.visual_start_position_overridden && m.start.offset < o.inner.start.offset {
+            o.inner.start = m.start;
+        }
+        if !o.inner.visual_end_position_overridden && m.end.offset > o.inner.end.offset {
+            o.inner.end = m.end;
+        }
+
+        o.inner.group.cancel |= m.group.cancel;
     }
 
-    fn apply(o: &mut FullMatch, m: &FullMatch) {
-        o.captures.extend(m.captures.clone());
-        // union
-        if m.start.offset < o.start.offset {
-            o.start.offset = m.start.offset;
-        }
-        if m.end.offset > o.end.offset {
-            o.end.offset = m.end.offset;
-        }
-        o.group.cancel |= m.group.cancel;
-    }
-
-    pub fn handle_applicable(&mut self, m: &'a FullMatch) {
+    pub fn handle_applicable(&mut self, rm: &mut FullMatchWrapper, m: &'a FullMatch) {
         if !m.group.unique {
-            Self::apply(&mut self.start, m);
+            Self::apply(rm, m);
         } else {
             self.unique_rules.entry(&m.name).or_default().push(m);
         }
     }
 
-    pub fn drain(self, out: &mut impl FnMut(FullMatch), max_unique_expansions: NonZero<usize>) {
-        let axes: Vec<Vec<&FullMatch>> = self.unique_rules.into_values().collect();
+    pub fn drain(
+        self,
+        rm: FullMatchWrapper,
+        out: &mut impl FnMut(FullMatch),
+        max_unique_expansions: NonZero<usize>,
+    ) {
+        let mut axes: Vec<_> = self.unique_rules.into_iter().collect();
+        axes.sort_by_key(|(k, _)| *k); // required for deterministic output match order
+        let axes: Vec<Vec<&FullMatch>> = axes.into_iter().map(|(_, v)| v).collect();
+
         let mut count = 0;
 
         fn cartesian<'a>(
@@ -90,14 +95,14 @@ impl<'a> UniqueOuts<'a> {
             if count >= max_unique_expansions.get() {
                 return false;
             }
-            let mut result = self.start.clone();
+            let mut result = rm.clone();
             for m in combo {
                 Self::apply(&mut result, m);
             }
-            let grp = std::mem::take(&mut result.group);
-            result.name = grp.name;
-            result.group.cancel = grp.cancel;
-            out(result);
+            let grp = std::mem::take(&mut result.inner.group);
+            result.inner.name = grp.name;
+            result.inner.group.cancel = grp.cancel;
+            out(result.inner);
             count += 1;
             count < max_unique_expansions.get()
         });
@@ -138,7 +143,7 @@ impl Grouper {
 
     fn drain_one(
         me: &mut VecDeque<FullMatchWrapper>,
-        rm: FullMatchWrapper,
+        mut rm: FullMatchWrapper,
         out: &mut impl FnMut(FullMatch),
         max_unique_expansions: NonZero<usize>,
     ) {
@@ -149,19 +154,19 @@ impl Grouper {
             return;
         }
 
-        let mut rm = rm.inner;
-
-        let mut outs = UniqueOuts::new(rm.clone());
+        let mut outs = UniqueOuts::default();
         'outer: for m in me.iter_mut() {
-            if m.inner.start.offset > rm.start.offset || m.inner.end.offset < rm.end.offset {
+            if m.inner.actual_start_offset > rm.inner.actual_start_offset
+                || m.inner.actual_end_offset < rm.inner.actual_end_offset
+            {
                 continue; // non-applicable span
             }
 
             // each queue only has that one group
-            debug_assert!(m.inner.group.name == rm.group.name);
+            debug_assert!(m.inner.group.name == rm.inner.group.name);
 
-            for k in rm.group.r#match.iter() {
-                if let Some(rm_v) = rm.captures.get(k) {
+            for k in rm.inner.group.r#match.iter() {
+                if let Some(rm_v) = rm.inner.captures.get(k) {
                     // both declare a same variable then those variables
                     // must match - otherwise these are unrelated
                     if let Some(m_v) = m.inner.captures.get(k) {
@@ -172,23 +177,13 @@ impl Grouper {
                 }
             }
 
-            // this match is applicable
-            m.used = true;
-            if m.inner.name == rm.name {
-                // the full match can obtain match captures from other patterns
-                // in the same pattern file
-                let ks: Vec<_> = rm.group.r#match.iter().collect();
-                for k in ks {
-                    if !rm.captures.contains_key(k) {
-                        if let Some(m_v) = m.inner.captures.get(k) {
-                            rm.captures.insert(k.clone(), m_v.clone());
-                        }
-                    }
-                }
-            }
-            outs.handle_applicable(&m.inner);
+            // this match is applicable. if for some reason there is a
+            // standalone unique rule with no anchor, then we don't mark it used
+            // and each are sent to the output individually (more consistent)
+            m.used |= !rm.inner.group.unique;
+            outs.handle_applicable(&mut rm, &m.inner);
         }
-        outs.drain(out, max_unique_expansions);
+        outs.drain(rm, out, max_unique_expansions);
     }
 
     pub fn process(&mut self, m: FullMatch, mut out: impl FnMut(FullMatch)) {
@@ -237,14 +232,15 @@ impl Grouper {
                 break;
             }
             let prev = &full_matches[insertion_position - 1];
-            if prev.inner.end.offset != m.end.offset {
+            if prev.inner.actual_end_offset != m.actual_end_offset {
                 // very likely
                 //
                 // worst case O(n) but this is constant since full_matches is
                 // capped
                 break;
             }
-            if prev.inner.start.offset >= m.start.offset {
+
+            if prev.inner.actual_start_offset >= m.actual_start_offset {
                 break;
             }
             insertion_position -= 1;
