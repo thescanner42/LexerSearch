@@ -608,55 +608,82 @@ impl<'g> Matcher<'g> {
                 _ => {}
             }
 
-            if current.bracket_state.depth != 0 {
-                // blocked by NOT TOO SHORT rule
-            } else {
-                // attempt literal transition
-                let literal: Option<GraphTokenVariant> = match &input.variant {
-                    TokenVariant::Byte(b) => Some(GraphTokenVariant::Byte(*b)),
-                    TokenVariant::String(items) => {
-                        Some(GraphTokenVariant::Captureable(items.clone()))
-                    }
-                    TokenVariant::Identifier(items) => {
-                        Some(GraphTokenVariant::Captureable(items.clone()))
-                    }
-                    TokenVariant::LexicalLevelChange(v) => {
-                        Some(GraphTokenVariant::LexicalLevelChange(*v))
-                    }
-                    _ => None,
-                };
-
-                if let Some(literal) = literal {
-                    if let Some(v) = graph.nodes[current.trie_position].edge.get(&literal) {
-                        for v in v {
-                            v.handle(|v, set_start, set_end| {
-                                let m = PartialMatch {
-                                    visual_start_position: if set_start {
-                                        input.start
-                                    } else {
-                                        current.visual_start_position
-                                    },
-                                    visual_end_position: if set_end {
-                                        Some(input.end)
-                                    } else {
-                                        current.visual_end_position
-                                    },
-                                    original_start_position: current.original_start_position,
-                                    trie_position: v,
-                                    capture_stack: current.capture_stack.clone(), // rc
-                                    bracket_state: current
-                                        .bracket_state
-                                        .pass_through_scope_blocking(),
-                                    visual_start_position_overridden: current
-                                        .visual_start_position_overridden
-                                        | set_start,
-                                };
-                                handle_maybe_full_match(exprs, graph, &m, &input, out);
-                                handle_partial_match(next_matches, max_concurrent_matches, m);
-                                Ok(())
-                            })
-                            .unwrap();
+            let maybe_edge: Option<GraphTokenVariant> = match &input.variant {
+                TokenVariant::Byte(b) => {
+                    let mut enforce_not_too_short = false;
+                    let mut debug_checker = 0usize;
+                    if current.bracket_state.depth != 0 {
+                        if match graph.nodes[current.trie_position].ellipsis.other {
+                            crate::engine::span::GraphNodeEllipsisInfoEnum::Round(_) => {
+                                *b == b'(' || *b == b')'
+                            }
+                            crate::engine::span::GraphNodeEllipsisInfoEnum::Square(_) => {
+                                *b == b'[' || *b == b']'
+                            }
+                            crate::engine::span::GraphNodeEllipsisInfoEnum::Curly(_) => {
+                                *b == b'{' || *b == b'}'
+                            }
+                            _ => false,
+                        } {
+                            enforce_not_too_short |= true;
+                            debug_checker += 1;
                         }
+
+                        if !graph.nodes[current.trie_position].ellipsis.corner.is_empty() && (*b == b'<' || *b == b'>') {
+                            enforce_not_too_short |= true;
+                            debug_checker += 1;
+                        }
+                        // sanity checking understanding to ensure that patterns
+                        // can't interfere with each other - since each loop is
+                        // independent only one or the other will come into
+                        // effect
+                        debug_assert!(debug_checker < 2);
+                    }
+
+                    if enforce_not_too_short {
+                        None
+                    } else {
+                        Some(GraphTokenVariant::Byte(*b))
+                    }
+                }
+                TokenVariant::String(items) => Some(GraphTokenVariant::Captureable(items.clone())),
+                TokenVariant::Identifier(items) => {
+                    Some(GraphTokenVariant::Captureable(items.clone()))
+                }
+                TokenVariant::LexicalLevelChange(v) => {
+                    Some(GraphTokenVariant::LexicalLevelChange(*v))
+                }
+                _ => None,
+            };
+
+            if let Some(edge) = maybe_edge {
+                if let Some(v) = graph.nodes[current.trie_position].edge.get(&edge) {
+                    for v in v {
+                        v.handle(|v, set_start, set_end| {
+                            let m = PartialMatch {
+                                visual_start_position: if set_start {
+                                    input.start
+                                } else {
+                                    current.visual_start_position
+                                },
+                                visual_end_position: if set_end {
+                                    Some(input.end)
+                                } else {
+                                    current.visual_end_position
+                                },
+                                original_start_position: current.original_start_position,
+                                trie_position: v,
+                                capture_stack: current.capture_stack.clone(), // rc
+                                bracket_state: current.bracket_state.pass_through_scope_blocking(),
+                                visual_start_position_overridden: current
+                                    .visual_start_position_overridden
+                                    | set_start,
+                            };
+                            handle_maybe_full_match(exprs, graph, &m, &input, out);
+                            handle_partial_match(next_matches, max_concurrent_matches, m);
+                            Ok(())
+                        })
+                        .unwrap(); // closure only gives OK
                     }
                 }
             }
@@ -757,7 +784,7 @@ impl<'g> Matcher<'g> {
                         current.bracket_state.depth.checked_add_signed(depth_delta)
                     {
                         let mut next = current.clone();
-                        next.bracket_state.depth = new_depth;
+                            next.bracket_state.depth = new_depth;
                         next.trie_position = dst;
                         handle_partial_match(next_matches, max_concurrent_matches, next);
                     }

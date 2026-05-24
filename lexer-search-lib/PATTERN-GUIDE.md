@@ -107,9 +107,8 @@ deduced for other types of brackets.
 
 ### Not Too Short
 
-When declared in brackets, the ellipsis operators match from an open bracket to
-the corresponding close bracket. This better handles nested brackets. For
-example rule `test(...)`:
+When declared in brackets, the ellipsis operators will keep track of bracket
+depth and will not exit the bracket scope early. For example rule `test(...)`:
 
 ```c
 // don't stop early at first ')'
