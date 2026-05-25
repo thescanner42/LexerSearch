@@ -28,16 +28,6 @@ pub struct PartialMatchBracketState {
     statement_blocking: u32,
 }
 
-impl PartialMatchBracketState {
-    pub fn pass_through_scope_blocking(&self) -> Self {
-        Self {
-            depth: 0,
-            scope_blocking: self.scope_blocking,
-            statement_blocking: self.statement_blocking,
-        }
-    }
-}
-
 #[derive(Clone, Default, Debug)]
 pub struct PartialMatch {
     /// byte offset in input
@@ -429,7 +419,6 @@ impl<'g> Matcher<'g> {
             match &input.variant {
                 TokenVariant::String(items) | TokenVariant::Identifier(items) => {
                     // non-capture transition
-                    let bracket_state = current.bracket_state.pass_through_scope_blocking();
                     for v in graph.nodes[current.trie_position].non_capture.iter() {
                         v.handle(|index, set_start, set_end| {
                             let new_start_position = if set_start {
@@ -445,7 +434,7 @@ impl<'g> Matcher<'g> {
                                 original_start_position: current.original_start_position,
                                 trie_position: index,
                                 capture_stack: current.capture_stack.clone(),
-                                bracket_state,
+                                bracket_state: current.bracket_state,
                                 visual_start_position_overridden: current
                                     .visual_start_position_overridden
                                     | set_start,
@@ -476,7 +465,7 @@ impl<'g> Matcher<'g> {
                                 original_start_position: current.original_start_position,
                                 trie_position: index,
                                 capture_stack: new_stack.clone(), // rc
-                                bracket_state,
+                                bracket_state: current.bracket_state,
                                 visual_start_position_overridden: current
                                     .visual_start_position_overridden
                                     | set_start,
@@ -507,9 +496,7 @@ impl<'g> Matcher<'g> {
                                         original_start_position: current.original_start_position,
                                         trie_position: v,
                                         capture_stack: current.capture_stack.clone(),
-                                        bracket_state: current
-                                            .bracket_state
-                                            .pass_through_scope_blocking(),
+                                        bracket_state: current.bracket_state,
                                         visual_start_position_overridden: current
                                             .visual_start_position_overridden
                                             | set_start,
@@ -549,9 +536,7 @@ impl<'g> Matcher<'g> {
                                         original_start_position: current.original_start_position,
                                         trie_position: v,
                                         capture_stack: new_stack,
-                                        bracket_state: current
-                                            .bracket_state
-                                            .pass_through_scope_blocking(),
+                                        bracket_state: current.bracket_state,
                                         visual_start_position_overridden: current
                                             .visual_start_position_overridden
                                             | set_start,
@@ -589,9 +574,7 @@ impl<'g> Matcher<'g> {
                                     original_start_position: current.original_start_position,
                                     trie_position: v,
                                     capture_stack: new_stack,
-                                    bracket_state: current
-                                        .bracket_state
-                                        .pass_through_scope_blocking(),
+                                    bracket_state: current.bracket_state,
                                     visual_start_position_overridden: current
                                         .visual_start_position_overridden
                                         | set_start,
@@ -614,22 +597,21 @@ impl<'g> Matcher<'g> {
                     let mut debug_checker = 0usize;
                     if current.bracket_state.depth != 0 {
                         if match graph.nodes[current.trie_position].ellipsis.other {
-                            crate::engine::span::GraphNodeEllipsisInfoEnum::Round(_) => {
-                                *b == b'(' || *b == b')'
-                            }
-                            crate::engine::span::GraphNodeEllipsisInfoEnum::Square(_) => {
-                                *b == b'[' || *b == b']'
-                            }
-                            crate::engine::span::GraphNodeEllipsisInfoEnum::Curly(_) => {
-                                *b == b'{' || *b == b'}'
-                            }
+                            crate::engine::span::GraphNodeEllipsisInfoEnum::Round(_) => *b == b')',
+                            crate::engine::span::GraphNodeEllipsisInfoEnum::Square(_) => *b == b']',
+                            crate::engine::span::GraphNodeEllipsisInfoEnum::Curly(_) => *b == b'}',
                             _ => false,
                         } {
                             enforce_not_too_short |= true;
                             debug_checker += 1;
                         }
 
-                        if !graph.nodes[current.trie_position].ellipsis.corner.is_empty() && (*b == b'<' || *b == b'>') {
+                        if !graph.nodes[current.trie_position]
+                            .ellipsis
+                            .corner
+                            .is_empty()
+                            && *b == b'>'
+                        {
                             enforce_not_too_short |= true;
                             debug_checker += 1;
                         }
@@ -641,6 +623,8 @@ impl<'g> Matcher<'g> {
                     }
 
                     if enforce_not_too_short {
+                        // e.g. the literal ) transition is not available while
+                        // traversing ... with a non-zero depth
                         None
                     } else {
                         Some(GraphTokenVariant::Byte(*b))
@@ -674,7 +658,7 @@ impl<'g> Matcher<'g> {
                                 original_start_position: current.original_start_position,
                                 trie_position: v,
                                 capture_stack: current.capture_stack.clone(), // rc
-                                bracket_state: current.bracket_state.pass_through_scope_blocking(),
+                                bracket_state: current.bracket_state,
                                 visual_start_position_overridden: current
                                     .visual_start_position_overridden
                                     | set_start,
@@ -784,7 +768,7 @@ impl<'g> Matcher<'g> {
                         current.bracket_state.depth.checked_add_signed(depth_delta)
                     {
                         let mut next = current.clone();
-                            next.bracket_state.depth = new_depth;
+                        next.bracket_state.depth = new_depth;
                         next.trie_position = dst;
                         handle_partial_match(next_matches, max_concurrent_matches, next);
                     }

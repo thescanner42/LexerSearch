@@ -1,6 +1,6 @@
 [package]
 name = "lexer-search"
-version = "3.3.1"
+version = "3.3.2"
 edition = "2024"
 
 [workspace]
