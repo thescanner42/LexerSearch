@@ -426,7 +426,11 @@ impl<'g> Matcher<'g> {
                             } else {
                                 current.visual_start_position
                             };
-                            let new_end_position = if set_end { Some(input.end) } else { None };
+                            let new_end_position = if set_end {
+                                Some(input.end)
+                            } else {
+                                current.visual_end_position
+                            };
 
                             let m = PartialMatch {
                                 visual_start_position: new_start_position,
@@ -457,7 +461,11 @@ impl<'g> Matcher<'g> {
                             } else {
                                 current.visual_start_position
                             };
-                            let new_end_position = if set_end { Some(input.end) } else { None };
+                            let new_end_position = if set_end {
+                                Some(input.end)
+                            } else {
+                                current.visual_end_position
+                            };
 
                             let m = PartialMatch {
                                 visual_start_position: new_start_position,
