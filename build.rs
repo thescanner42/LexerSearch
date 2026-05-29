@@ -45,7 +45,16 @@ fn main() -> Result<(), String> {
         Err(_) => lexer_search_lib::lexer::DEFAULT_MAX_TOKEN_LENGTH,
     };
 
-    let tries = Graphs::construct_graphs(std::path::Path::new(&patterns_path), max_token_length)?;
+    let max_template_expansions = match std::env::var("LEXERSEARCH_MAX_TEMPLATE_EXPANSIONS") {
+        Ok(val) => val.parse::<NonZeroUsize>().map_err(|e| e.to_string())?,
+        Err(_) => lexer_search_lib::lexer::DEFAULT_MAX_EXPANSIONS,
+    };
+
+    let tries = Graphs::construct_graphs(
+        std::path::Path::new(&patterns_path),
+        max_token_length,
+        max_template_expansions,
+    )?;
 
     let mut path = PathBuf::new();
     path.push("target");

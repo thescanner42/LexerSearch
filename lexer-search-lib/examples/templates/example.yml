@@ -1,0 +1,12 @@
+# example purposes
+patterns:
+- |-
+  free({{FREE_ARG}})
+name: pattern template example
+languages:
+  - c
+templates:
+  FREE_ARG:
+    - $VAR
+    - $_->$VAR
+    - $_.$VAR

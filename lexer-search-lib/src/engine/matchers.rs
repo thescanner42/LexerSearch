@@ -1,7 +1,10 @@
 use std::{num::NonZeroUsize, path::Path};
 
 use crate::{
-    engine::graph::{Graph, GraphBuilder},
+    engine::{
+        graph::{Graph, GraphBuilder},
+        template,
+    },
     io::Language,
 };
 
@@ -133,6 +136,7 @@ impl Graphs {
     pub fn construct_graphs(
         pattern_path: &Path,
         max_token_length: NonZeroUsize,
+        max_template_expansions: NonZeroUsize,
     ) -> Result<Self, String> {
         let mut builders = GraphsBuilder::default();
 
@@ -151,61 +155,67 @@ impl Graphs {
                             serde_yml::from_str(&txt).map_err(|e| {
                                 format!("YAML load {}: {}", path.display(), e.to_string())
                             })?;
-                        for pattern in patterns_file.patterns.iter() {
-                            for lang in patterns_file.languages.iter() {
-                                let mut reader = std::io::Cursor::new(pattern);
-                                match lang {
-                                    Language::C
-                                    | Language::Cpp
-                                    | Language::CSharp
-                                    | Language::Java => {
-                                        builders.graph_for_lang_mut(*lang).add_pattern(
-                                            &mut reader,
-                                            &patterns_file.out,
-                                            patterns_file.name.clone(),
-                                            patterns_file.group.clone(),
-                                            &patterns_file.transform,
-                                            make_c_like_lexer(false, true, max_token_length),
-                                            max_token_length,
-                                        )?;
-                                    }
-                                    Language::Go
-                                    | Language::Js
-                                    | Language::Ts
-                                    | Language::Kotlin => {
-                                        builders.graph_for_lang_mut(*lang).add_pattern(
-                                            &mut reader,
-                                            &patterns_file.out,
-                                            patterns_file.name.clone(),
-                                            patterns_file.group.clone(),
-                                            &patterns_file.transform,
-                                            make_c_like_lexer(true, true, max_token_length),
-                                            max_token_length,
-                                        )?;
-                                    }
-                                    Language::Py => {
-                                        builders.graph_for_lang_mut(*lang).add_pattern(
-                                            &mut reader,
-                                            &patterns_file.out,
-                                            patterns_file.name.clone(),
-                                            patterns_file.group.clone(),
-                                            &patterns_file.transform,
-                                            make_python_like_lexer(true, max_token_length),
-                                            max_token_length,
-                                        )?;
-                                    }
-                                    Language::Rust => {
-                                        builders.graph_for_lang_mut(*lang).add_pattern(
-                                            &mut reader,
-                                            &patterns_file.out,
-                                            patterns_file.name.clone(),
-                                            patterns_file.group.clone(),
-                                            &patterns_file.transform,
-                                            make_rust_like_lexer(true, max_token_length),
-                                            max_token_length,
-                                        )?;
-                                    }
-                                };
+                        for unexpanded_pattern in patterns_file.patterns.into_iter() {
+                            for pattern in template::expand(
+                                &unexpanded_pattern,
+                                &patterns_file.templates,
+                                max_template_expansions,
+                            )? {
+                                for lang in patterns_file.languages.iter() {
+                                    let mut reader = std::io::Cursor::new(&pattern);
+                                    match lang {
+                                        Language::C
+                                        | Language::Cpp
+                                        | Language::CSharp
+                                        | Language::Java => {
+                                            builders.graph_for_lang_mut(*lang).add_pattern(
+                                                &mut reader,
+                                                &patterns_file.out,
+                                                patterns_file.name.clone(),
+                                                patterns_file.group.clone(),
+                                                &patterns_file.transform,
+                                                make_c_like_lexer(false, true, max_token_length),
+                                                max_token_length,
+                                            )?;
+                                        }
+                                        Language::Go
+                                        | Language::Js
+                                        | Language::Ts
+                                        | Language::Kotlin => {
+                                            builders.graph_for_lang_mut(*lang).add_pattern(
+                                                &mut reader,
+                                                &patterns_file.out,
+                                                patterns_file.name.clone(),
+                                                patterns_file.group.clone(),
+                                                &patterns_file.transform,
+                                                make_c_like_lexer(true, true, max_token_length),
+                                                max_token_length,
+                                            )?;
+                                        }
+                                        Language::Py => {
+                                            builders.graph_for_lang_mut(*lang).add_pattern(
+                                                &mut reader,
+                                                &patterns_file.out,
+                                                patterns_file.name.clone(),
+                                                patterns_file.group.clone(),
+                                                &patterns_file.transform,
+                                                make_python_like_lexer(true, max_token_length),
+                                                max_token_length,
+                                            )?;
+                                        }
+                                        Language::Rust => {
+                                            builders.graph_for_lang_mut(*lang).add_pattern(
+                                                &mut reader,
+                                                &patterns_file.out,
+                                                patterns_file.name.clone(),
+                                                patterns_file.group.clone(),
+                                                &patterns_file.transform,
+                                                make_rust_like_lexer(true, max_token_length),
+                                                max_token_length,
+                                            )?;
+                                        }
+                                    };
+                                }
                             }
                         }
                     }

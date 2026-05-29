@@ -16,7 +16,10 @@ use lexer_search_lib::{
         matchers::{Graphs, make_c_like_lexer, make_python_like_lexer, make_rust_like_lexer},
     },
     io::{FullMatchOut, Language, final_postprocess},
-    lexer::{DEFAULT_MAX_CONCURRENT_MATCHES, DEFAULT_MAX_DISTINCT_GROUPS, DEFAULT_MAX_GROUP_MEMORY, DEFAULT_MAX_TOKEN_LENGTH, DEFAULT_MAX_UNIQUE_EXPANSIONS},
+    lexer::{
+        DEFAULT_MAX_CONCURRENT_MATCHES, DEFAULT_MAX_DISTINCT_GROUPS, DEFAULT_MAX_EXPANSIONS,
+        DEFAULT_MAX_GROUP_MEMORY, DEFAULT_MAX_TOKEN_LENGTH,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -44,8 +47,13 @@ pub struct Args {
     pub max_group_memory: NonZero<usize>,
     /// when grouping, the maximum number of times that matches can be
     /// duplicated when unique pattern matches are encountered
-    #[arg(default_value_t = DEFAULT_MAX_UNIQUE_EXPANSIONS)]
+    #[arg(default_value_t = DEFAULT_MAX_EXPANSIONS)]
     pub max_group_unique_expansions: NonZero<usize>,
+    /// when expanding templates in a pattern, the max number of expansions
+    /// allowed before instead giving a compilation error
+    #[cfg(not(feature = "embed-patterns"))]
+    #[arg(default_value_t = DEFAULT_MAX_EXPANSIONS)]
+    pub max_template_expansions: NonZero<usize>,
 
     /// emit matcher graph debug information
     #[cfg(not(feature = "embed-patterns"))]
@@ -64,7 +72,11 @@ fn main() -> Result<(), String> {
     let tries = {
         #[cfg(not(feature = "embed-patterns"))]
         {
-            let r = Graphs::construct_graphs(&args.patterns_path, args.max_token_length)?;
+            let r = Graphs::construct_graphs(
+                &args.patterns_path,
+                args.max_token_length,
+                args.max_template_expansions,
+            )?;
             if args.debug_graph {
                 let out = serde_json::to_string(&r).map_err(|e| e.to_string())?;
                 println!("{}", out);

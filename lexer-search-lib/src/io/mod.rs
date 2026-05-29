@@ -95,6 +95,13 @@ pub struct PatternsFile {
         serialize_with = "serialize_map_bytes_string"
     )]
     pub transform: BTreeMap<Box<[u8]>, String>,
+
+    #[serde(
+        default,
+        deserialize_with = "deserialize_map_bytes_vec_bytes",
+        serialize_with = "serialize_map_bytes_vec_bytes"
+    )]
+    pub templates: BTreeMap<Box<[u8]>, Vec<Box<[u8]>>>,
 }
 
 //
@@ -140,6 +147,28 @@ where
             (
                 k.into_bytes().into_boxed_slice(),
                 v.into_bytes().into_boxed_slice(),
+            )
+        })
+        .collect())
+}
+
+fn deserialize_map_bytes_vec_bytes<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<Box<[u8]>, Vec<Box<[u8]>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+
+    Ok(map
+        .into_iter()
+        .map(|(k, values)| {
+            (
+                k.into_bytes().into_boxed_slice(),
+                values
+                    .into_iter()
+                    .map(|v| v.into_bytes().into_boxed_slice())
+                    .collect(),
             )
         })
         .collect())
@@ -196,6 +225,29 @@ where
         .collect();
 
     map.serialize(serializer)
+}
+
+fn serialize_map_bytes_vec_bytes<S>(
+    value: &BTreeMap<Box<[u8]>, Vec<Box<[u8]>>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let converted: BTreeMap<String, Vec<String>> = value
+        .iter()
+        .map(|(k, values)| {
+            (
+                String::from_utf8_lossy(k).into_owned(),
+                values
+                    .iter()
+                    .map(|v| String::from_utf8_lossy(v).into_owned())
+                    .collect(),
+            )
+        })
+        .collect();
+
+    converted.serialize(serializer)
 }
 
 // annotate with which file it came from

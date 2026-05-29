@@ -144,11 +144,11 @@ impl RepititionTokenVariant {
             RepititionTokenVariant::PopReplace(v) => {
                 out.push(14);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
-            },
+            }
             RepititionTokenVariant::CreateReplace(v) => {
                 out.push(15);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
-            },
+            }
         }
 
         out

@@ -288,6 +288,10 @@ impl GraphBuilder {
                 }
             })? {
                 None => {
+                    if current_repitition.is_some() {
+                        return Err("unclosed repitition".to_string());
+                    }
+
                     // no more input
                     fn reverse_map(
                         captures: HashMap<Box<[u8]>, usize>,

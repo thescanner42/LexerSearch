@@ -98,15 +98,7 @@ impl InputSpanPreprocess {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    bincode::Encode,
-    bincode::Decode,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct SetSpan {
     /// [none, start, end, both]
     slots: [Option<usize>; 4],
@@ -336,8 +328,9 @@ impl GraphBuilderNodeEllipsisInfo {
     }
 }
 
-
-#[derive(Default, Debug, PartialEq, Eq, serde::Serialize, bincode::Encode, bincode::Decode, Clone)]
+#[derive(
+    Default, Debug, PartialEq, Eq, serde::Serialize, bincode::Encode, bincode::Decode, Clone,
+)]
 pub struct GraphNodeEllipsisInfo {
     // corner is separate since ..> can be stated in an arbitrary position
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -348,7 +341,9 @@ pub struct GraphNodeEllipsisInfo {
 
 /// it's not possible to have ... be contained and not contained in brackets yet
 /// reaching the same node, inside of a pattern. this structure represents that
-#[derive(Default, Debug, PartialEq, Eq, serde::Serialize, bincode::Encode, bincode::Decode, Clone)]
+#[derive(
+    Default, Debug, PartialEq, Eq, serde::Serialize, bincode::Encode, bincode::Decode, Clone,
+)]
 pub enum GraphNodeEllipsisInfoEnum {
     #[default]
     None,
@@ -369,36 +364,33 @@ impl GraphNodeEllipsisInfo {
         *self == Default::default()
     }
 
-    pub fn handle(
-        &self,
-        mut f: impl FnMut(usize, EllipsisInfoHandleEnum),
-    ) {
+    pub fn handle(&self, mut f: impl FnMut(usize, EllipsisInfoHandleEnum)) {
         for corner in self.corner.iter() {
             f(*corner, EllipsisInfoHandleEnum::Corner);
         }
 
         match &self.other {
-            GraphNodeEllipsisInfoEnum::None => {},
+            GraphNodeEllipsisInfoEnum::None => {}
             GraphNodeEllipsisInfoEnum::Uncontained(items) => {
                 for v in items.iter() {
                     f(*v, EllipsisInfoHandleEnum::Uncontained);
                 }
-            },
+            }
             GraphNodeEllipsisInfoEnum::Round(items) => {
                 for v in items.iter() {
                     f(*v, EllipsisInfoHandleEnum::Round);
                 }
-            },
+            }
             GraphNodeEllipsisInfoEnum::Square(items) => {
                 for v in items.iter() {
                     f(*v, EllipsisInfoHandleEnum::Square);
                 }
-            },
+            }
             GraphNodeEllipsisInfoEnum::Curly(items) => {
                 for v in items.iter() {
                     f(*v, EllipsisInfoHandleEnum::Curly);
                 }
-            },
+            }
         }
     }
 }

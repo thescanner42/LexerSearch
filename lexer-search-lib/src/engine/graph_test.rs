@@ -1,8 +1,9 @@
 use std::{collections::HashMap, num::NonZero};
 
-use crate::engine::{graph::{
-    GraphBuilder, GraphBuilderNode, GraphTokenVariant, PatternInfo,
-}, span::SetSpan};
+use crate::engine::{
+    graph::{GraphBuilder, GraphBuilderNode, GraphTokenVariant, PatternInfo},
+    span::SetSpan,
+};
 
 #[test]
 fn graph_builder_simple_abc() {

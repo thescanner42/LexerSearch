@@ -6,5 +6,6 @@ mod grouper; // postfilter
 pub mod matcher;
 pub mod matchers;
 pub mod regex_cache;
-pub mod token;
 pub mod span;
+mod template;
+pub mod token;

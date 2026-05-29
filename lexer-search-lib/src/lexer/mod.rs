@@ -9,8 +9,7 @@ pub const DEFAULT_MAX_TOKEN_LENGTH: NonZeroUsize = unsafe { NonZeroUsize::new_un
 
 pub const DEFAULT_MAX_DISTINCT_GROUPS: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(300) };
 pub const DEFAULT_MAX_GROUP_MEMORY: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(25) };
-pub const DEFAULT_MAX_UNIQUE_EXPANSIONS: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(64) };
-
+pub const DEFAULT_MAX_EXPANSIONS: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(64) };
 
 /// utf8 multibyte sequences are treated as part of the identifier (even though
 /// it could be whitespace). erroneous case never happens in practice. malformed

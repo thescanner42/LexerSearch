@@ -3,6 +3,7 @@
 Patterns are contained in yaml files. The top level keys are:
 
 - [patterns](#patterns)
+- [templates](#templates)
 - [languages](#languages)
 - [transform](#transform)
 - [out](#out)
@@ -47,15 +48,15 @@ A capture is written with a dollar prefix (e.g. `$VAR`). It matches one
 capture-able lexer token, which is a:
 
 - number
+- string literal, or
 - identifier/keyword
-- or string literal
 
 The type of token that was captured can be determined from the first character
 of the captured token.
 
 - number -> `[0-9]+`
-- identifier/keyword -> `[a-zA-Z_][a-zA-Z0-9_]*`
 - string literal -> `".*"`
+- identifier/keyword -> everything else
 
 The first time a capture with a new name is written in a pattern is the creation
 of that capture; the captured token is remembered and can be referred to later.
@@ -325,6 +326,42 @@ By default this is disabled and the patterns are passed via cli.
 $ cargo run -- <PATTERNS_PATH> <SCAN_PATH> # DEFAULT
 $ LEXERSEARCH_EMBED_PATTERNS=<PATTERNS_PATH> cargo run --features=embed-patterns -- <SCAN_PATH>
 ```
+
+# Templates
+
+To prevent duplication when writing patterns, basic pre-processing list template
+substitution is exposed via the `templates` key. For example:
+
+```yaml
+patterns:
+- |-
+  free({{FREE_ARG}})
+name: pattern template example
+languages:
+  - c
+templates:
+  FREE_ARG:
+    - $VAR
+    - $_->$VAR
+    - $_.$VAR
+```
+
+A template starts with `{{` and ends with `}}`. It contains the key lookup to
+use in `templates` (e.g. `FREE_ARG` in the above example). Under the key is a
+list of values which will be used to substitute the template in the pattern. The
+above example expands into the following patterns:
+
+- `free($VAR)`
+- `free($_->$VAR)`
+- `free($_.$VAR)`
+
+If the same template is stated in multiple position in the pattern then they
+will only take on the same value. For example, `{{A}}-{{A}}`, `A`s input of `[red,
+blue]` will yield: `red-red`, `blue-blue`.
+
+> [!TIP]  
+> As with all other control tokens in LexerSearch, they can be escaped with
+> whitespace (e.g. `{ {`)
 
 # Languages
 

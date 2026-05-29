@@ -1,7 +1,8 @@
 use std::num::NonZero;
 
 use crate::lexer::{
-    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType, calc_start_offset
+    EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position, c_like::CaptureType,
+    calc_start_offset,
 };
 
 use super::utf8_multibyte_part;
