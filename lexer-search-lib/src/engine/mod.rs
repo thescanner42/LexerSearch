@@ -7,5 +7,5 @@ pub mod matcher;
 pub mod matchers;
 pub mod regex_cache;
 pub mod span;
-mod template;
+pub mod template;
 pub mod token;
