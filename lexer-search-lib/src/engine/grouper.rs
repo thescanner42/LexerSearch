@@ -110,14 +110,6 @@ impl<'a> UniqueOuts<'a> {
 }
 
 impl Grouper {
-    pub fn dummy() -> Self {
-        Grouper::new(
-            1.try_into().unwrap(),
-            1.try_into().unwrap(),
-            1.try_into().unwrap(),
-        )
-    }
-
     pub fn new(
         max_distinct_groups: NonZero<usize>,
         max_full_matches: NonZero<usize>,

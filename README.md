@@ -7,7 +7,7 @@ LexerSearch is a static analysis tool for detecting issues in source code.
 |  |  |
 |---------|-------------|
 | **SAFE** | LexerSearch can handle **any input**. It operates with **bounded memory** regardless of the source code size and will **never error** during scanning. |
-| **FAST** | Scanning occurs in **linear time** and is typically over **50× faster** than existing tools like Semgrep. |
+| **FAST** | Scanning occurs in **linear time** and is typically over **80× faster** than existing tools like Semgrep. |
 | **CLEAR** | Pattern matching is **explainable**. Transparent logic explains exactly **why a match occurs**.  |
 
 _________

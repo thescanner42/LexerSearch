@@ -1,11 +1,14 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     fmt,
     num::NonZero,
     vec,
 };
 
+use ahash::AHashMap;
+use bincode::Decode;
 use serde::{Serialize, Serializer};
+use smallvec::SmallVec;
 
 use crate::{
     engine::{
@@ -167,10 +170,39 @@ mod serde_out_set {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmallVecBincodeWrapper(pub SmallVec<[u8; 0x40]>);
+
+impl bincode::Encode for SmallVecBincodeWrapper {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.as_slice().encode(encoder)
+    }
+}
+
+impl<Context> bincode::Decode<Context> for SmallVecBincodeWrapper {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self(SmallVec::from_vec(Vec::<u8>::decode(decoder)?)))
+    }
+}
+
+impl<'de, Context> bincode::BorrowDecode<'de, Context> for SmallVecBincodeWrapper {
+    fn borrow_decode<D>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError>
+    where
+        D: bincode::de::BorrowDecoder<'de, Context = Context>,
+    {
+        Ok(Self(SmallVec::from_vec(Vec::<u8>::borrow_decode(decoder)?)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, bincode::Encode, bincode::Decode)]
 pub enum GraphTokenVariant {
     Byte(u8),
-    Captureable(Box<[u8]>),
+    Captureable(SmallVecBincodeWrapper),
     /// see LexerTokenVariant for more details
     LexicalLevelChange(i32),
 }
@@ -188,14 +220,14 @@ impl fmt::Display for GraphTokenVariant {
             }
             GraphTokenVariant::Captureable(bytes) => {
                 // if every byte is printable ascii, render as a string
-                if bytes.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
-                    for b in bytes.iter() {
+                if bytes.0.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+                    for b in bytes.0.iter() {
                         write!(f, "{}", *b as char)?;
                     }
                     Ok(())
                 } else {
                     // mixed or non-ascii: fall back to comma-separated decimals
-                    for (i, b) in bytes.iter().enumerate() {
+                    for (i, b) in bytes.0.iter().enumerate() {
                         if i > 0 {
                             write!(f, ",")?;
                         }
@@ -218,8 +250,8 @@ impl Serialize for GraphTokenVariant {
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct GraphBuilderNode {
-    pub(crate) edge: HashMap<GraphTokenVariant, SetSpan>,
-    pub(crate) repitition: HashMap<MultiRepitition, usize>,
+    pub(crate) edge: AHashMap<GraphTokenVariant, SetSpan>,
+    pub(crate) repitition: AHashMap<MultiRepitition, usize>,
     pub(crate) ellipsis: GraphBuilderNodeEllipsisInfo,
     pub(crate) scope_blocking: Option<usize>,
     pub(crate) statement_blocking: Option<usize>,
@@ -227,9 +259,9 @@ pub struct GraphBuilderNode {
     pub(crate) non_capture: Option<SetSpan>,
 
     /// associates capture index being replaced with where to go    
-    pub(crate) backref: HashMap<usize, SetSpan>,
-    pub(crate) create_replace: HashMap<usize, SetSpan>,
-    pub(crate) backref_replace: HashMap<usize, SetSpan>,
+    pub(crate) backref: AHashMap<usize, SetSpan>,
+    pub(crate) create_replace: AHashMap<usize, SetSpan>,
+    pub(crate) backref_replace: AHashMap<usize, SetSpan>,
 
     pub(crate) full_match: Vec<PatternInfo>,
 }
@@ -271,7 +303,7 @@ impl GraphBuilder {
         let mut current_repitition: Option<(MultiRepitition, Vec<Box<[u8]>>)> = None;
 
         // keep track of first time seeing capture vs backreference
-        let mut captures: HashMap<Box<[u8]>, usize> = Default::default();
+        let mut captures: AHashMap<Box<[u8]>, usize> = Default::default();
         let mut capture_count_increment = 0;
 
         loop {
@@ -294,7 +326,7 @@ impl GraphBuilder {
 
                     // no more input
                     fn reverse_map(
-                        captures: HashMap<Box<[u8]>, usize>,
+                        captures: AHashMap<Box<[u8]>, usize>,
                         transform: &BTreeMap<Box<[u8]>, String>,
                     ) -> Result<Box<[BackrefInfo]>, String> {
                         let len = captures.len();
@@ -657,7 +689,7 @@ impl GraphBuilder {
                         | TokenVariant::Capture(_) => unreachable!(), // handled by various paths above
                         TokenVariant::Byte(b) => GraphTokenVariant::Byte(b),
                         TokenVariant::String(items) | TokenVariant::Identifier(items) => {
-                            GraphTokenVariant::Captureable(items)
+                            GraphTokenVariant::Captureable(SmallVecBincodeWrapper(items))
                         }
                         TokenVariant::LexicalLevelChange(v) => {
                             GraphTokenVariant::LexicalLevelChange(v)
@@ -700,7 +732,7 @@ impl GraphBuilder {
     }
 
     fn insert_edge(node: &mut GraphNode, k: GraphTokenVariant, v: SetSpan) {
-        match node.edge.entry(k) {
+        match node.edge.0.entry(k) {
             std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                 occupied_entry.get_mut().push(v);
             }
@@ -711,8 +743,8 @@ impl GraphBuilder {
     }
 
     fn copy_transitions(src: &GraphNode, dst: &mut GraphNode) -> Result<(), String> {
-        for (k, v) in src.edge.iter() {
-            match dst.edge.entry(k.clone()) {
+        for (k, v) in src.edge.0.iter() {
+            match dst.edge.0.entry(k.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                     occupied_entry.get_mut().extend_from_slice(v);
                 }
@@ -751,8 +783,8 @@ impl GraphBuilder {
 
         dst.full_match.extend_from_slice(&src.full_match);
 
-        for (k, v) in src.backref.iter() {
-            match dst.backref.entry(k.clone()) {
+        for (k, v) in src.backref.0.iter() {
+            match dst.backref.0.entry(k.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                     occupied_entry.get_mut().extend_from_slice(v);
                 }
@@ -762,8 +794,8 @@ impl GraphBuilder {
             }
         }
 
-        for (k, v) in src.pop_replace.iter() {
-            match dst.pop_replace.entry(k.clone()) {
+        for (k, v) in src.pop_replace.0.iter() {
+            match dst.pop_replace.0.entry(k.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                     occupied_entry.get_mut().extend_from_slice(v);
                 }
@@ -773,8 +805,8 @@ impl GraphBuilder {
             }
         }
 
-        for (k, v) in src.create_replace.iter() {
-            match dst.create_replace.entry(k.clone()) {
+        for (k, v) in src.create_replace.0.iter() {
+            match dst.create_replace.0.entry(k.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                     occupied_entry.get_mut().extend_from_slice(v);
                 }
@@ -802,7 +834,7 @@ impl GraphBuilder {
             }
         }
 
-        for targets in g.edge.values_mut() {
+        for targets in g.edge.0.values_mut() {
             rewrite_setstart_enum_vec(targets, src, dst);
         }
 
@@ -819,15 +851,15 @@ impl GraphBuilder {
         rewrite_setstart_enum_vec(&mut g.create_capture, src, dst);
         rewrite_setstart_enum_vec(&mut g.non_capture, src, dst);
 
-        for v in g.backref.values_mut() {
+        for v in g.backref.0.values_mut() {
             rewrite_setstart_enum_vec(v, src, dst);
         }
 
-        for v in g.pop_replace.values_mut() {
+        for v in g.pop_replace.0.values_mut() {
             rewrite_setstart_enum_vec(v, src, dst);
         }
 
-        for v in g.create_replace.values_mut() {
+        for v in g.create_replace.0.values_mut() {
             rewrite_setstart_enum_vec(v, src, dst);
         }
     }
@@ -992,7 +1024,7 @@ impl GraphBuilder {
                 ret.push(Default::default());
                 Self::build_subroutine(self, in_dst, ret, None)?;
                 ret[ret_current_position]
-                    .backref
+                    .backref.0
                     .entry(capture_index)
                     .or_default()
                     .push(SetSpan::from(out_dst, set_start, set_end));
@@ -1006,7 +1038,7 @@ impl GraphBuilder {
                 ret.push(Default::default());
                 Self::build_subroutine(self, in_dst, ret, None)?;
                 ret[ret_current_position]
-                    .create_replace
+                    .create_replace.0
                     .entry(capture_index)
                     .or_default()
                     .push(SetSpan::from(out_dst, set_start, set_end));
@@ -1020,7 +1052,7 @@ impl GraphBuilder {
                 ret.push(Default::default());
                 Self::build_subroutine(self, in_dst, ret, None)?;
                 ret[ret_current_position]
-                    .pop_replace
+                    .pop_replace.0
                     .entry(capture_index)
                     .or_default()
                     .push(SetSpan::from(out_dst, set_start, set_end));
@@ -1100,7 +1132,9 @@ impl GraphBuilder {
                                             GraphTokenVariant::Byte(b)
                                         }
                                         RepititionTokenVariant::Captureable(items) => {
-                                            GraphTokenVariant::Captureable(items)
+                                            GraphTokenVariant::Captureable(SmallVecBincodeWrapper(
+                                                items,
+                                            ))
                                         }
                                         RepititionTokenVariant::LexicalLevelChange(lv) => {
                                             GraphTokenVariant::LexicalLevelChange(lv)
@@ -1331,7 +1365,7 @@ impl GraphBuilder {
                                         r
                                     };
                                     ret[repitition_current_position]
-                                        .create_replace
+                                        .create_replace.0
                                         .entry(*n)
                                         .or_default()
                                         .push(SetSpan::from(out_dst, false, false));
@@ -1346,7 +1380,7 @@ impl GraphBuilder {
                                         r
                                     };
                                     ret[repitition_current_position]
-                                        .backref
+                                        .backref.0
                                         .entry(*n)
                                         .or_default()
                                         .push(SetSpan::from(out_dst, false, false));
@@ -1361,7 +1395,7 @@ impl GraphBuilder {
                                         r
                                     };
                                     ret[repitition_current_position]
-                                        .pop_replace
+                                        .pop_replace.0
                                         .entry(*n)
                                         .or_default()
                                         .push(SetSpan::from(out_dst, false, false));
@@ -1384,12 +1418,94 @@ impl GraphBuilder {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AHashMapBincode<K: Eq + std::hash::Hash, V: PartialEq>(pub AHashMap<K, V>);
+
+impl<K: Eq + std::hash::Hash, V: PartialEq> Default for AHashMapBincode<K, V> {
+    fn default() -> Self {
+        Self(AHashMap::new())
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V: PartialEq> AHashMapBincode<K, V> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<K, V> bincode::Encode for AHashMapBincode<K, V>
+where
+    K: bincode::Encode + Eq + std::hash::Hash,
+    V: bincode::Encode + PartialEq,
+{
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let len = self.0.len() as u64;
+        len.encode(encoder)?;
+
+        for (k, v) in &self.0 {
+            k.encode(encoder)?;
+            v.encode(encoder)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<Context, K, V> Decode<Context> for AHashMapBincode<K, V>
+where
+    K: Decode<Context> + Eq + std::hash::Hash,
+    V: Decode<Context> + PartialEq,
+{
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let len = u64::decode(decoder)? as usize;
+
+        let mut map = AHashMap::with_capacity(len);
+
+        for _ in 0..len {
+            let k = K::decode(decoder)?;
+            let v = V::decode(decoder)?;
+            map.insert(k, v);
+        }
+
+        Ok(Self(map))
+    }
+}
+
+impl<'de, Context, K, V> bincode::BorrowDecode<'de, Context> for AHashMapBincode<K, V>
+where
+    K: Decode<Context> + Eq + std::hash::Hash,
+    V: Decode<Context> + PartialEq,
+{
+    fn borrow_decode<D>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError>
+    where
+        D: bincode::de::BorrowDecoder<'de, Context = Context>,
+    {
+        // We ignore borrowing entirely and just decode owned values
+        let len = u64::decode(decoder)? as usize;
+
+        let mut map = ahash::AHashMap::with_capacity(len);
+
+        for _ in 0..len {
+            let k = K::decode(decoder)?;
+            let v = V::decode(decoder)?;
+            map.insert(k, v);
+        }
+
+        Ok(Self(map))
+    }
+}
+
 #[derive(
     Debug, Default, Clone, serde::Serialize, bincode::Encode, bincode::Decode, PartialEq, Eq,
 )]
 pub struct GraphNode {
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub edge: HashMap<GraphTokenVariant, Vec<SetSpan>>,
+    #[serde(skip_serializing_if = "AHashMapBincode::is_empty")]
+    pub edge: AHashMapBincode<GraphTokenVariant, Vec<SetSpan>>,
     #[serde(skip_serializing_if = "GraphNodeEllipsisInfo::is_default")]
     pub ellipsis: GraphNodeEllipsisInfo,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1402,12 +1518,12 @@ pub struct GraphNode {
     pub non_capture: Vec<SetSpan>,
 
     /// associates capture index with where to go
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) backref: HashMap<usize, Vec<SetSpan>>,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) create_replace: HashMap<usize, Vec<SetSpan>>,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) pop_replace: HashMap<usize, Vec<SetSpan>>,
+    #[serde(skip_serializing_if = "AHashMapBincode::is_empty")]
+    pub(crate) backref: AHashMapBincode<usize, Vec<SetSpan>>,
+    #[serde(skip_serializing_if = "AHashMapBincode::is_empty")]
+    pub(crate) create_replace: AHashMapBincode<usize, Vec<SetSpan>>,
+    #[serde(skip_serializing_if = "AHashMapBincode::is_empty")]
+    pub(crate) pop_replace: AHashMapBincode<usize, Vec<SetSpan>>,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub full_match: Vec<PatternInfo>,

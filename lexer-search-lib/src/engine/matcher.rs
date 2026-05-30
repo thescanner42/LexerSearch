@@ -8,7 +8,7 @@ use std::{
 use crate::{
     engine::{
         canonicalizer::Canonicalizer,
-        graph::{Graph, GraphTokenVariant, GroupInfo},
+        graph::{Graph, GraphTokenVariant, GroupInfo, SmallVecBincodeWrapper},
         grouper::Grouper,
         regex_cache::RegexCache,
         span::EllipsisInfoHandleEnum,
@@ -144,8 +144,13 @@ pub struct Matcher<'g> {
     graph: &'g Graph,
     canonicalizer: Canonicalizer,
     matches: BinaryHeap<PartialMatch>,
+
+    // avoid allocating and freeing for each step - reuse and swap with matches
+    next_matches: BinaryHeap<PartialMatch>,
+
     max_concurrent_matches: usize,
-    grouper: Grouper,
+    // only None temporarily for borrow checker
+    grouper: Option<Grouper>,
     exprs: RegexCache,
 }
 
@@ -170,13 +175,14 @@ impl<'g> Matcher<'g> {
         Self {
             graph: graph,
             matches: Default::default(),
+            next_matches: Default::default(),
             max_concurrent_matches,
             canonicalizer: Canonicalizer::new(max_token_length),
-            grouper: Grouper::new(
+            grouper: Some(Grouper::new(
                 max_distinct_groups,
                 max_group_full_matches,
                 max_group_unique_expansions,
-            ),
+            )),
             exprs: Default::default(),
         }
     }
@@ -203,7 +209,7 @@ impl<'g> Matcher<'g> {
                     v
                 }
                 None => {
-                    self.grouper.drain(&mut out);
+                    self.grouper.as_mut().unwrap().drain(&mut out);
                     return Ok(());
                 }
             };
@@ -213,11 +219,11 @@ impl<'g> Matcher<'g> {
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
-            let mut grouper = std::mem::replace(&mut self.grouper, Grouper::dummy());
+            let mut grouper = std::mem::take(&mut self.grouper);
             self.step_token(token, |full_match| {
-                grouper.process(full_match, &mut out);
+                grouper.as_mut().unwrap().process(full_match, &mut out);
             });
-            std::mem::swap(&mut grouper, &mut self.grouper); // put it back
+            self.grouper = grouper; // put it back
         }
     }
 
@@ -239,7 +245,7 @@ impl<'g> Matcher<'g> {
                     v
                 },
                 None => {
-                    self.grouper.drain(&mut out);
+                    self.grouper.as_mut().unwrap().drain(&mut out);
                     return;
                 },
             };
@@ -249,11 +255,11 @@ impl<'g> Matcher<'g> {
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
-            let mut grouper = std::mem::replace(&mut self.grouper, Grouper::dummy());
+            let mut grouper = std::mem::take(&mut self.grouper);
             self.step_token(token, |full_match| {
-                grouper.process(full_match, &mut out);
+                grouper.as_mut().unwrap().process(full_match, &mut out);
             });
-            std::mem::swap(&mut grouper, &mut self.grouper); // put it back
+            self.grouper = grouper; // put it back
         }
     }
 
@@ -288,20 +294,17 @@ impl<'g> Matcher<'g> {
             debug_assert!(!matches!(token.variant, TokenVariant::OverlongCapture));
 
             // easiest way of satisfying borrow checker
-            let mut grouper = std::mem::replace(&mut self.grouper, Grouper::dummy());
+            let mut grouper = std::mem::take(&mut self.grouper);
             self.step_token(token, |full_match| {
-                grouper.process(full_match, &mut out);
+                grouper.as_mut().unwrap().process(full_match, &mut out);
             });
-            std::mem::swap(&mut grouper, &mut self.grouper); // put it back
+            self.grouper = grouper; // put it back
         }
     }
 
     /// step forward the pattern matching algorithm, returning any complete
     /// matches
     fn step_token(&mut self, token: Token, mut out: impl FnMut(FullMatch)) {
-        let mut next_matches: BinaryHeap<PartialMatch> =
-            BinaryHeap::with_capacity(self.max_concurrent_matches);
-
         fn explore_transitions(
             exprs: &mut RegexCache,
             current: PartialMatch,
@@ -486,8 +489,8 @@ impl<'g> Matcher<'g> {
                     }
 
                     // backref
-                    for (capture_index, dst) in graph.nodes[current.trie_position].backref.iter() {
-                        if *items == *current.capture_stack[*capture_index] {
+                    for (capture_index, dst) in graph.nodes[current.trie_position].backref.0.iter() {
+                        if *items.as_slice() == **current.capture_stack[*capture_index] {
                             for dst in dst.iter() {
                                 dst.handle(|v, set_start, set_end| {
                                     let m = PartialMatch {
@@ -520,9 +523,9 @@ impl<'g> Matcher<'g> {
 
                     // backref replace
                     for (capture_index, dst) in
-                        graph.nodes[current.trie_position].pop_replace.iter()
+                        graph.nodes[current.trie_position].pop_replace.0.iter()
                     {
-                        if *items == *current.capture_stack[*capture_index] {
+                        if *items.as_slice() == **current.capture_stack[*capture_index] {
                             for dst in dst.iter() {
                                 dst.handle(|v, set_start, set_end| {
                                     // replace content at position
@@ -560,7 +563,7 @@ impl<'g> Matcher<'g> {
 
                     // create replace
                     for (capture_index, dst) in
-                        graph.nodes[current.trie_position].create_replace.iter()
+                        graph.nodes[current.trie_position].create_replace.0.iter()
                     {
                         for dst in dst.iter() {
                             dst.handle(|v, set_start, set_end| {
@@ -638,9 +641,9 @@ impl<'g> Matcher<'g> {
                         Some(GraphTokenVariant::Byte(*b))
                     }
                 }
-                TokenVariant::String(items) => Some(GraphTokenVariant::Captureable(items.clone())),
+                TokenVariant::String(items) => Some(GraphTokenVariant::Captureable(SmallVecBincodeWrapper(items.clone()))),
                 TokenVariant::Identifier(items) => {
-                    Some(GraphTokenVariant::Captureable(items.clone()))
+                    Some(GraphTokenVariant::Captureable(SmallVecBincodeWrapper(items.clone())))
                 }
                 TokenVariant::LexicalLevelChange(v) => {
                     Some(GraphTokenVariant::LexicalLevelChange(*v))
@@ -649,7 +652,7 @@ impl<'g> Matcher<'g> {
             };
 
             if let Some(edge) = maybe_edge {
-                if let Some(v) = graph.nodes[current.trie_position].edge.get(&edge) {
+                if let Some(v) = graph.nodes[current.trie_position].edge.0.get(&edge) {
                     for v in v {
                         v.handle(|v, set_start, set_end| {
                             let m = PartialMatch {
@@ -789,7 +792,7 @@ impl<'g> Matcher<'g> {
                 m,
                 &token,
                 &self.graph,
-                &mut next_matches,
+                &mut self.next_matches,
                 self.max_concurrent_matches,
                 &mut out,
             );
@@ -800,11 +803,12 @@ impl<'g> Matcher<'g> {
             PartialMatch::new(token.start),
             &token,
             &self.graph,
-            &mut next_matches,
+            &mut self.next_matches,
             self.max_concurrent_matches,
             &mut out,
         );
 
-        self.matches = next_matches;
+        std::mem::swap(&mut self.matches, &mut self.next_matches);
+        self.next_matches.clear();
     }
 }

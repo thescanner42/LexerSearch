@@ -1,6 +1,7 @@
 use crate::lexer::{EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position};
 
 use rand::{RngExt, rng};
+use smallvec::SmallVec;
 use std::sync::OnceLock;
 
 /// bounded length owned token
@@ -11,30 +12,25 @@ pub enum TokenVariant {
     /// stops non-reflexive patterns
     OverlongString,
     Byte(u8),
-    String(Box<[u8]>),
-    Identifier(Box<[u8]>),
+    String(SmallVec<[u8; 0x40]>),
+    Identifier(SmallVec<[u8; 0x40]>),
     /// see LexerTokenVariant for more details
     LexicalLevelChange(i32),
 
     /// only used by pattern creation logic, not matching logic
     Ellipsis(EllipsisEnum),
     /// only used by pattern creation logic, not matching logic
-    Capture(Box<[u8]>),
+    Capture(SmallVec<[u8; 0x40]>),
     /// only used by pattern creation logic, not matching logic
     OverlongCapture,
 }
 
 impl TokenVariant {
     pub fn add_double_quotes(&mut self) {
-        match self {
-            TokenVariant::String(items) => {
-                let mut new_items = Vec::with_capacity(items.len() + 2);
-                new_items.push(b'"');
-                new_items.extend_from_slice(items);
-                new_items.push(b'"');
-                *items = new_items.into_boxed_slice();
-            }
-            _ => {}
+        if let TokenVariant::String(items) = self {
+            items.reserve(2);
+            items.insert(0, b'"');
+            items.push(b'"');
         }
     }
 }
@@ -51,28 +47,34 @@ impl Token {
         Token {
             variant: match token.variant {
                 LexerTokenVariant::Byte(b) => TokenVariant::Byte(b),
+
                 LexerTokenVariant::String(MaybeSliceRef::Len(_), _) => TokenVariant::OverlongString,
+
                 LexerTokenVariant::Identifier(MaybeSliceRef::Len(_)) => {
                     TokenVariant::OverlongIdentifier
                 }
+
                 LexerTokenVariant::String(MaybeSliceRef::Some(items), quote_len) => {
-                    TokenVariant::String(
-                        items[quote_len..items.len() - quote_len]
-                            .to_vec()
-                            .into_boxed_slice(),
-                    )
+                    TokenVariant::String(SmallVec::from_slice(
+                        &items[quote_len..items.len() - quote_len],
+                    ))
                 }
+
                 LexerTokenVariant::Identifier(MaybeSliceRef::Some(items)) => {
-                    TokenVariant::Identifier(items.to_vec().into_boxed_slice())
+                    TokenVariant::Identifier(SmallVec::from_slice(items))
                 }
+
                 LexerTokenVariant::LexicalLevelChange(delta, _maybe_items) => {
                     TokenVariant::LexicalLevelChange(delta)
                 }
+
                 // not produced by lexer not configured for pattern
                 LexerTokenVariant::Ellipsis(b) => TokenVariant::Ellipsis(b),
+
                 LexerTokenVariant::Capture(MaybeSliceRef::Len(_)) => TokenVariant::OverlongCapture,
+
                 LexerTokenVariant::Capture(MaybeSliceRef::Some(items)) => {
-                    TokenVariant::Capture(items.to_vec().into_boxed_slice())
+                    TokenVariant::Capture(SmallVec::from_slice(items))
                 }
             },
             start: token.start,
@@ -84,7 +86,7 @@ impl Token {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RepititionTokenVariant {
     Byte(u8),
-    Captureable(Box<[u8]>),
+    Captureable(SmallVec<[u8; 0x40]>),
     /// see LexerTokenVariant for more details
     LexicalLevelChange(i32),
 

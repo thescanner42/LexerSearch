@@ -1,7 +1,9 @@
-use std::{collections::HashMap, num::NonZero};
+use std::num::NonZero;
+
+use ahash::AHashMap;
 
 use crate::engine::{
-    graph::{GraphBuilder, GraphBuilderNode, GraphTokenVariant, PatternInfo},
+    graph::{GraphBuilder, GraphBuilderNode, GraphTokenVariant, PatternInfo, SmallVecBincodeWrapper},
     span::SetSpan,
 };
 
@@ -31,22 +33,22 @@ fn graph_builder_simple_abc() {
         .unwrap();
 
     let node1 = GraphBuilderNode {
-        edge: HashMap::from([(
-            GraphTokenVariant::Captureable(vec![b'a'].into_boxed_slice()),
+        edge: AHashMap::from([(
+            GraphTokenVariant::Captureable(SmallVecBincodeWrapper(vec![b'a'].into())),
             SetSpan::from(1, false, false),
         )]),
         ..Default::default()
     };
     let node2 = GraphBuilderNode {
-        edge: HashMap::from([(
-            GraphTokenVariant::Captureable(vec![b'b'].into_boxed_slice()),
+        edge: AHashMap::from([(
+            GraphTokenVariant::Captureable(SmallVecBincodeWrapper(vec![b'b'].into())),
             SetSpan::from(2, false, false),
         )]),
         ..Default::default()
     };
     let node3 = GraphBuilderNode {
-        edge: HashMap::from([(
-            GraphTokenVariant::Captureable(vec![b'c'].into_boxed_slice()),
+        edge: AHashMap::from([(
+            GraphTokenVariant::Captureable(SmallVecBincodeWrapper(vec![b'c'].into())),
             SetSpan::from(3, false, false),
         )]),
         ..Default::default()
@@ -109,20 +111,20 @@ fn graph_builder_simple_dedup() {
         .unwrap();
 
     let node1 = GraphBuilderNode {
-        edge: HashMap::from([(
-            GraphTokenVariant::Captureable(vec![b'a'].into_boxed_slice()),
+        edge: AHashMap::from([(
+            GraphTokenVariant::Captureable(SmallVecBincodeWrapper(vec![b'a'].into())),
             SetSpan::from(1, false, false),
         )]),
         ..Default::default()
     };
     let node2 = GraphBuilderNode {
-        edge: HashMap::from([
+        edge: AHashMap::from([
             (
-                GraphTokenVariant::Captureable(vec![b'b'].into_boxed_slice()),
+                GraphTokenVariant::Captureable(SmallVecBincodeWrapper(vec![b'b'].into())),
                 SetSpan::from(2, false, false),
             ),
             (
-                GraphTokenVariant::Captureable(vec![b'c'].into_boxed_slice()),
+                GraphTokenVariant::Captureable(SmallVecBincodeWrapper(vec![b'c'].into())),
                 SetSpan::from(3, false, false),
             ),
         ]),
