@@ -19,4 +19,19 @@
     free(abc);
     abc = malloc(sizeof(int));
     free(abc);
-} 
+}
+
+void tester(int* abc) {
+    free(abc);
+    free(abc); // also bad
+}
+
+void tester(my_type* abc) {
+    free(abc->other);
+    free(abc->other); // also bad
+}
+
+void tester(my_type* abc) {
+    free(abc[0].nested->field);
+    free(abc[0].nested->field); // also bad
+}

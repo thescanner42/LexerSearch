@@ -1500,6 +1500,12 @@ where
     }
 }
 
+// for in-memory size, current implementation is dense. in the future if it
+// becomes a problem, then GraphNode & GraphBuilderNode should be changed from a
+// dense representation to a sparse representation - especially if it's found
+// that a majority of nodes are nearly empty (that is not known at this time,
+// since common prefixes simply reuse the same nodes but add different
+// transitions, and that will be more likely with more patterns)
 #[derive(
     Debug, Default, Clone, serde::Serialize, bincode::Encode, bincode::Decode, PartialEq, Eq,
 )]
