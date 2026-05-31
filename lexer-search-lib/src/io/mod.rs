@@ -1,3 +1,4 @@
+use ahash::AHashSet;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, ffi::OsStr, path::PathBuf};
 
@@ -15,13 +16,12 @@ use crate::engine::{graph::GroupInfo, matcher::FullMatch};
     Eq,
     PartialOrd,
     Ord,
+    Hash,
 )]
 #[serde(deny_unknown_fields)]
 pub enum Language {
-    #[serde(rename = "c")]
+    #[serde(rename = "c", alias = "c++", alias = "cpp")]
     C,
-    #[serde(rename = "c++", alias = "cpp")]
-    Cpp,
     #[serde(rename = "c#", alias = "csharp", alias = "cs")]
     CSharp,
     #[serde(rename = "go", alias = "golang")]
@@ -44,9 +44,8 @@ impl Language {
     pub fn from_file_extension(extension: &OsStr) -> Option<Language> {
         match extension.to_ascii_lowercase().to_str() {
             Some(ext) => match ext {
-                "c" => Some(Language::C),
+                "c" | "cpp" | "cxx" | "h" | "hpp" => Some(Language::C),
                 "cs" => Some(Language::CSharp),
-                "cpp" | "cxx" => Some(Language::Cpp),
                 "go" => Some(Language::Go),
                 "java" => Some(Language::Java),
                 "javascript" | "js" | "mjs" => Some(Language::Js),
@@ -71,7 +70,8 @@ pub struct PatternsFile {
     )]
     pub patterns: Vec<Box<[u8]>>,
 
-    pub languages: Vec<Language>,
+    // make this a set just in case of duplicate languages
+    pub languages: AHashSet<Language>,
 
     #[serde(default)]
     pub name: String,

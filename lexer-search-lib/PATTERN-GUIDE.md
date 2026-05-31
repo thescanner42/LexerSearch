@@ -254,7 +254,7 @@ Matches:
 ```rust
 x = source;
 x2 = x;
-sink(x);
+sink(x2);
 ```
 
 In the example, `%X`:
@@ -284,6 +284,16 @@ its content to the capture-able token it receives, replacing `$X`.
 > [!TIP]  
 > Create replace can also be stated outside of repitition sections to replace an
 > existing capture.
+
+## Alternation
+
+An alternation provides a set of one or more choices which must be followed to
+complete a pattern. For example: `a ..- first ..| second ..- b` will match either of:
+
+- `a first b`
+- `a second b`
+
+The different branches in an alternation should be mutually exclusive, or else multiple matches can occur simultaneously.
 
 ## Set Span
 
@@ -362,6 +372,10 @@ blue]` will yield: `red-red`, `blue-blue`.
 > [!TIP]  
 > As with all other control tokens in LexerSearch, they can be escaped with
 > whitespace (e.g. `{ {`)
+
+> [!WARNING]  
+> avoid templates where possible as it could generate large graphs. first
+> consider using an alternation or multi-repitition where possible.
 
 # Languages
 

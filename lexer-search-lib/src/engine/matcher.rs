@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BinaryHeap},
     num::NonZero,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use crate::{
@@ -16,6 +16,8 @@ use crate::{
     },
     lexer::{Lexer, Position},
 };
+
+static EXCESSIVE_PARTIAL_MATCHES_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct PartialMatchBracketState {
@@ -320,6 +322,12 @@ impl<'g> Matcher<'g> {
                 element: PartialMatch,
             ) {
                 if next_matches.len() >= max_concurrent_matches {
+                    if EXCESSIVE_PARTIAL_MATCHES_WARNING_PRINTED
+                        .compare_exchange(false, true, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        eprintln!("warning: partial matches dropped");
+                    }
                     next_matches.pop();
                 }
                 next_matches.push(element);
@@ -489,7 +497,8 @@ impl<'g> Matcher<'g> {
                     }
 
                     // backref
-                    for (capture_index, dst) in graph.nodes[current.trie_position].backref.0.iter() {
+                    for (capture_index, dst) in graph.nodes[current.trie_position].backref.0.iter()
+                    {
                         if *items.as_slice() == **current.capture_stack[*capture_index] {
                             for dst in dst.iter() {
                                 dst.handle(|v, set_start, set_end| {
@@ -641,10 +650,12 @@ impl<'g> Matcher<'g> {
                         Some(GraphTokenVariant::Byte(*b))
                     }
                 }
-                TokenVariant::String(items) => Some(GraphTokenVariant::Captureable(SmallVecBincodeWrapper(items.clone()))),
-                TokenVariant::Identifier(items) => {
-                    Some(GraphTokenVariant::Captureable(SmallVecBincodeWrapper(items.clone())))
-                }
+                TokenVariant::String(items) => Some(GraphTokenVariant::Captureable(
+                    SmallVecBincodeWrapper(items.clone()),
+                )),
+                TokenVariant::Identifier(items) => Some(GraphTokenVariant::Captureable(
+                    SmallVecBincodeWrapper(items.clone()),
+                )),
                 TokenVariant::LexicalLevelChange(v) => {
                     Some(GraphTokenVariant::LexicalLevelChange(*v))
                 }

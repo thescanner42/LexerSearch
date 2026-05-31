@@ -1,4 +1,3 @@
-{"file":"test.c","start":{"offset":129,"column":10,"line":7},"end":{"offset":132,"column":13,"line":7},"name":"double_free"}
-{"file":"test.c","start":{"offset":382,"column":10,"line":26},"end":{"offset":385,"column":13,"line":26},"name":"double_free"}
-{"file":"test.c","start":{"offset":462,"column":10,"line":31},"end":{"offset":472,"column":20,"line":31},"name":"double_free"}
-{"file":"test.c","start":{"offset":559,"column":10,"line":36},"end":{"offset":579,"column":30,"line":36},"name":"double_free"}
+{"file":"test.c","start":{"offset":406,"column":10,"line":26},"end":{"offset":409,"column":13,"line":26},"name":"double_free"}
+{"file":"test.c","start":{"offset":486,"column":10,"line":31},"end":{"offset":496,"column":20,"line":31},"name":"double_free"}
+{"file":"test.c","start":{"offset":583,"column":10,"line":36},"end":{"offset":603,"column":30,"line":36},"name":"double_free"}

@@ -18,7 +18,7 @@ use crate::{
             InputSpanPreprocess, InputSpanPreprocessOutput, SetSpan,
         },
         token::{
-            BracketStack, GraphBuilderBracketType, MultiRepitition, RepititionTokenVariant, Token,
+            BracketStack, GraphBuilderBracketType, ParallelPath, ParrallelPathTokenVariant, Token,
             TokenVariant,
         },
     },
@@ -251,7 +251,8 @@ impl Serialize for GraphTokenVariant {
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct GraphBuilderNode {
     pub(crate) edge: AHashMap<GraphTokenVariant, SetSpan>,
-    pub(crate) repitition: AHashMap<MultiRepitition, usize>,
+    pub(crate) repitition: AHashMap<ParallelPath, usize>,
+    pub(crate) alternation: AHashMap<ParallelPath, usize>,
     pub(crate) ellipsis: GraphBuilderNodeEllipsisInfo,
     pub(crate) scope_blocking: Option<usize>,
     pub(crate) statement_blocking: Option<usize>,
@@ -299,8 +300,15 @@ impl GraphBuilder {
         let mut span_preprocessor = InputSpanPreprocess::default();
         let mut graph_position = 0usize;
         // the current multi reptitition and the captures that were created in
-        // the last repitition
-        let mut current_repitition: Option<(MultiRepitition, Vec<Box<[u8]>>)> = None;
+        // the last repitition (must sum to zero before completing this
+        // repitition)
+        let mut current_repitition: Option<(ParallelPath, Vec<Box<[u8]>>)> = None;
+        // the current alternation. current implementation forbids captures from
+        // being created in an alternation for a couple different reasons -
+        // since each branch leads to the same node if each branch could create
+        // captures in different positions or a different number of captures
+        // this would be unsafe. this can be improved in the future
+        let mut current_alternation: Option<ParallelPath> = None;
 
         // keep track of first time seeing capture vs backreference
         let mut captures: AHashMap<Box<[u8]>, usize> = Default::default();
@@ -322,6 +330,10 @@ impl GraphBuilder {
                 None => {
                     if current_repitition.is_some() {
                         return Err("unclosed repitition".to_string());
+                    }
+
+                    if current_alternation.is_some() {
+                        return Err("unclosed alternation".to_string());
                     }
 
                     // no more input
@@ -387,18 +399,19 @@ impl GraphBuilder {
                 t.token.variant,
                 TokenVariant::Ellipsis(EllipsisEnum::JumpSep)
             ) {
-                match current_repitition.as_mut() {
-                    None => {
-                        return Err("..| only allowed in repitition".to_string());
+                match (current_repitition.as_mut(), current_alternation.as_mut()) {
+                    (None, None) => {
+                        return Err("..| only allowed in repitition or alternation".to_string());
                     }
-                    Some((v, new_captures)) => {
-                        if !new_captures.is_empty() {
-                            return Err(
-                                "a repitition must have a sum of zero captures created".to_string()
-                            );
-                        }
-                        v.push_repitition();
+                    (None, Some(current_alternation)) => {
+                        current_alternation.push_branch();
                     }
+                    (Some((current_repititions, _)), None) => {
+                        current_repititions.push_branch();
+                    }
+                    // current implementation forbids overlap between repitition
+                    // and alternation - template can be used if needed
+                    (Some(_), Some(_)) => unreachable!(),
                 }
                 continue;
             }
@@ -427,41 +440,80 @@ impl GraphBuilder {
                     }
                     None => {
                         // begin ..*
+                        if current_alternation.is_some() {
+                            return Err("current implementation forbids repitition inside alternation - use a template instead".to_string());
+                        }
                         current_repitition = Some(Default::default());
                     }
                 }
                 continue;
             }
 
-            if let Some((repitition, new_captures)) = current_repitition.as_mut() {
-                repitition.push(match t.token.variant {
+            if matches!(t.token.variant, TokenVariant::Ellipsis(EllipsisEnum::Or)) {
+                // start or stop of a pattern OR
+                match current_alternation.take() {
+                    Some(alternation) => {
+                        // end of ..- pattern or. fully known at this point
+                        match self.nodes[graph_position].alternation.entry(alternation) {
+                            std::collections::hash_map::Entry::Occupied(occupied_entry) => {
+                                graph_position = *occupied_entry.get(); // follow existing
+                            }
+                            std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                                vacant_entry.insert(nodes_len);
+                                self.nodes.push(Default::default());
+                                graph_position = nodes_len;
+                            }
+                        }
+                    }
+                    None => {
+                        // begin ..-
+                        if current_repitition.is_some() {
+                            return Err("current implementation forbids alternation inside repitition - instead use multiple repitition paths or a template instead".to_string());
+                        }
+                        current_alternation = Some(Default::default());
+                    }
+                }
+                continue;
+            }
+
+            if let Some((parallel_path, repitition_new_captures)) =
+                match (current_repitition.as_mut(), current_alternation.as_mut()) {
+                    (None, None) => None,
+                    (None, Some(v)) => Some((v, None)),
+                    (Some((v, repitition_new_captures)), None) => {
+                        Some((v, Some(repitition_new_captures)))
+                    }
+                    (Some(_), Some(_)) => unreachable!(),
+                }
+            {
+                parallel_path.push(match t.token.variant {
                     // convert token variant to reptition token variant
                     TokenVariant::OverlongIdentifier
                     | TokenVariant::OverlongString
                     | TokenVariant::OverlongCapture => unreachable!(), // above
-                    TokenVariant::Byte(b) => RepititionTokenVariant::Byte(b),
+                    TokenVariant::Byte(b) => ParrallelPathTokenVariant::Byte(b),
                     TokenVariant::String(items) | TokenVariant::Identifier(items) => {
-                        RepititionTokenVariant::Captureable(items)
+                        ParrallelPathTokenVariant::Captureable(items)
                     }
                     TokenVariant::LexicalLevelChange(v) => {
-                        RepititionTokenVariant::LexicalLevelChange(v)
+                        ParrallelPathTokenVariant::LexicalLevelChange(v)
                     }
                     TokenVariant::Ellipsis(ellipsis_enum) => match ellipsis_enum {
-                        EllipsisEnum::Jump | EllipsisEnum::JumpSep => unreachable!(), // above
+                        EllipsisEnum::Jump | EllipsisEnum::JumpSep | EllipsisEnum::Or => unreachable!(), // above
                         EllipsisEnum::Normal => match bracket_stack.last() {
-                            None => RepititionTokenVariant::Uncontained,
+                            None => ParrallelPathTokenVariant::Uncontained,
                             Some(v) => match v {
-                                GraphBuilderBracketType::Round => RepititionTokenVariant::Round,
-                                GraphBuilderBracketType::Square => RepititionTokenVariant::Square,
-                                GraphBuilderBracketType::Curly => RepititionTokenVariant::Curly,
+                                GraphBuilderBracketType::Round => ParrallelPathTokenVariant::Round,
+                                GraphBuilderBracketType::Square => ParrallelPathTokenVariant::Square,
+                                GraphBuilderBracketType::Curly => ParrallelPathTokenVariant::Curly,
                             },
                         },
-                        EllipsisEnum::CBE => RepititionTokenVariant::Corner,
+                        EllipsisEnum::CBE => ParrallelPathTokenVariant::Corner,
                         EllipsisEnum::SBE(v) => {
                             if v {
-                                RepititionTokenVariant::StatementBlocking
+                                ParrallelPathTokenVariant::StatementBlocking
                             } else {
-                                RepititionTokenVariant::ScopeBlocking
+                                ParrallelPathTokenVariant::ScopeBlocking
                             }
                         }
                         EllipsisEnum::SetStart | EllipsisEnum::SetEnd => unreachable!(), // handled by span preprocess
@@ -472,30 +524,38 @@ impl GraphBuilder {
                                 // normal capture
                                 if *items == *b"$_" {
                                     // non-capture
-                                    RepititionTokenVariant::NonCapturingCapture
+                                    ParrallelPathTokenVariant::NonCapturingCapture
                                 } else {
                                     if let Some(v) = captures.get(&items[1..]) {
                                         // backref normal capture
-                                        RepititionTokenVariant::Backref(*v)
+                                        ParrallelPathTokenVariant::Backref(*v)
                                     } else {
                                         // create capture
-                                        new_captures.push(Box::<[_]>::from(&items[1..]));
-                                        captures.insert(items[1..].into(), capture_count_increment);
-                                        capture_count_increment += 1;
-                                        RepititionTokenVariant::CreateCapture
+                                        if let Some(new_captures) = repitition_new_captures {
+                                            new_captures.push(Box::<[_]>::from(&items[1..]));
+                                            captures.insert(items[1..].into(), capture_count_increment);
+                                            capture_count_increment += 1;
+                                            ParrallelPathTokenVariant::CreateCapture
+                                        } else {
+                                            return Err("creating captures inside alternation is not allowed - consider using a template instead".to_string());
+                                        }
                                     }
                                 }
                             }
                             b'%' => {
                                 // replace capture
                                 if let Some(&v) = captures.get(&items[1..]) {
-                                    match new_captures.pop() {
-                                        Some(new_capture) => {
-                                            captures.remove(&new_capture).unwrap();
-                                            capture_count_increment -= 1;
-                                            RepititionTokenVariant::PopReplace(v)
+                                    if let Some(new_captures) = repitition_new_captures {
+                                        match new_captures.pop() {
+                                            Some(new_capture) => {
+                                                captures.remove(&new_capture).unwrap();
+                                                capture_count_increment -= 1;
+                                                ParrallelPathTokenVariant::PopReplace(v)
+                                            }
+                                            None => ParrallelPathTokenVariant::CreateReplace(v),
                                         }
-                                        None => RepititionTokenVariant::CreateReplace(v),
+                                    } else {
+                                        ParrallelPathTokenVariant::CreateReplace(v)
                                     }
                                 } else {
                                     return Err(
@@ -513,7 +573,9 @@ impl GraphBuilder {
             match t.token.variant {
                 TokenVariant::Ellipsis(e) => {
                     match e {
-                        EllipsisEnum::Jump | EllipsisEnum::JumpSep => unreachable!(), // handled above
+                        EllipsisEnum::Jump | EllipsisEnum::JumpSep | EllipsisEnum::Or => {
+                            unreachable!()
+                        } // handled above
                         EllipsisEnum::CBE => {
                             let old_graph_pos = graph_position;
                             let mut taken = std::mem::take(&mut self.nodes[old_graph_pos].ellipsis);
@@ -890,6 +952,245 @@ impl GraphBuilder {
             })?;
         }
 
+        // handle alternation
+        let mut alternations = std::mem::take(&mut self.nodes[in_position].alternation);
+        for (alternation, dst_in_position) in alternations.drain() {
+            let alternation = alternation.get_vec();
+            // each of the branches in the same alternation end up at the
+            // same output position. once one of them is created, this is
+            // set to Some(), and the others build to the same position
+            let mut out_dst_pos: Option<usize> = None;
+            for alternation in alternation.into_iter() {
+                // mark the current output position, as for each of the alternations
+                // we will start at the same position in the output and build off of
+                // there
+                let mut ret_alternation_build_position = ret_current_position;
+
+                let alternation_len = alternation.len();
+
+                if alternation_len == 0 {
+                    return Err(
+                        "empty alternation branch not supported - use a template instead"
+                            .to_string(),
+                    );
+                }
+
+                for (i, token) in alternation.into_iter().enumerate() {
+                    let last_in_this_branch = i == alternation_len - 1;
+                    if ret_alternation_build_position == ret_current_position || last_in_this_branch
+                    {
+                        match token {
+                            ParrallelPathTokenVariant::Uncontained
+                            | ParrallelPathTokenVariant::Corner
+                            | ParrallelPathTokenVariant::Round
+                            | ParrallelPathTokenVariant::Square
+                            | ParrallelPathTokenVariant::Curly
+                            | ParrallelPathTokenVariant::ScopeBlocking
+                            | ParrallelPathTokenVariant::StatementBlocking => {
+                                // this can be improved - needs thinking to
+                                // prevent pattern conflicts since the start and
+                                // end of each branch is shared
+                                return Err("alternation can't start or end with a reflexive transition (e.g. ...)".to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    match token {
+                        ParrallelPathTokenVariant::Captureable(_)
+                        | ParrallelPathTokenVariant::Byte(_)
+                        | ParrallelPathTokenVariant::LexicalLevelChange(_) => {
+                            let out_dst = if last_in_this_branch && out_dst_pos.is_some() {
+                                out_dst_pos.unwrap()
+                            } else {
+                                let r = ret.len();
+                                if last_in_this_branch {
+                                    out_dst_pos = Some(r);
+                                }
+                                ret.push(Default::default());
+                                r
+                            };
+                            let transition_to_insert = match token {
+                                ParrallelPathTokenVariant::Byte(b) => GraphTokenVariant::Byte(b),
+                                ParrallelPathTokenVariant::Captureable(items) => {
+                                    GraphTokenVariant::Captureable(SmallVecBincodeWrapper(items))
+                                }
+                                ParrallelPathTokenVariant::LexicalLevelChange(lv) => {
+                                    GraphTokenVariant::LexicalLevelChange(lv)
+                                }
+                                _ => unreachable!(),
+                            };
+                            GraphBuilder::insert_edge(
+                                &mut ret[ret_alternation_build_position],
+                                transition_to_insert,
+                                SetSpan::from(out_dst, false, false),
+                            );
+                            ret_alternation_build_position = out_dst;
+                        }
+                        ParrallelPathTokenVariant::Uncontained => {
+                            match &mut ret[ret_alternation_build_position].ellipsis.other {
+                                GraphNodeEllipsisInfoEnum::Uncontained(un_items) => {
+                                    un_items.push(ret_alternation_build_position);
+                                }
+                                GraphNodeEllipsisInfoEnum::None => {
+                                    ret[ret_alternation_build_position].ellipsis.other =
+                                        GraphNodeEllipsisInfoEnum::Uncontained(vec![
+                                            ret_alternation_build_position,
+                                        ]);
+                                }
+                                _ => {
+                                    // never
+                                    return Err("... clashing in builder".to_string());
+                                }
+                            }
+                        }
+                        ParrallelPathTokenVariant::Corner => {
+                            ret[ret_alternation_build_position]
+                                .ellipsis
+                                .corner
+                                .push(ret_alternation_build_position);
+                        }
+                        ParrallelPathTokenVariant::Round => {
+                            match &mut ret[ret_alternation_build_position].ellipsis.other {
+                                GraphNodeEllipsisInfoEnum::Round(un_items) => {
+                                    un_items.push(ret_alternation_build_position);
+                                }
+                                GraphNodeEllipsisInfoEnum::None => {
+                                    ret[ret_alternation_build_position].ellipsis.other =
+                                        GraphNodeEllipsisInfoEnum::Round(vec![
+                                            ret_alternation_build_position,
+                                        ]);
+                                }
+                                _ => {
+                                    // never
+                                    return Err("(...) clashing in builder".to_string());
+                                }
+                            }
+                        }
+                        ParrallelPathTokenVariant::Square => {
+                            match &mut ret[ret_alternation_build_position].ellipsis.other {
+                                GraphNodeEllipsisInfoEnum::Square(un_items) => {
+                                    un_items.push(ret_alternation_build_position);
+                                }
+                                GraphNodeEllipsisInfoEnum::None => {
+                                    ret[ret_alternation_build_position].ellipsis.other =
+                                        GraphNodeEllipsisInfoEnum::Square(vec![
+                                            ret_alternation_build_position,
+                                        ]);
+                                }
+                                _ => {
+                                    // never
+                                    return Err("[...] clashing in builder".to_string());
+                                }
+                            }
+                        }
+                        ParrallelPathTokenVariant::Curly => {
+                            match &mut ret[ret_alternation_build_position].ellipsis.other {
+                                GraphNodeEllipsisInfoEnum::Curly(un_items) => {
+                                    un_items.push(ret_alternation_build_position);
+                                }
+                                GraphNodeEllipsisInfoEnum::None => {
+                                    ret[ret_alternation_build_position].ellipsis.other =
+                                        GraphNodeEllipsisInfoEnum::Curly(vec![
+                                            ret_alternation_build_position,
+                                        ]);
+                                }
+                                _ => {
+                                    // never
+                                    return Err("{...} clashing in builder".to_string());
+                                }
+                            }
+                        }
+                        ParrallelPathTokenVariant::ScopeBlocking => {
+                            ret[ret_alternation_build_position]
+                                .scope_blocking
+                                .push(ret_alternation_build_position);
+                        }
+                        ParrallelPathTokenVariant::StatementBlocking => {
+                            ret[ret_alternation_build_position]
+                                .statement_blocking
+                                .push(ret_alternation_build_position);
+                        }
+                        ParrallelPathTokenVariant::NonCapturingCapture => {
+                            let out_dst = if last_in_this_branch && out_dst_pos.is_some() {
+                                out_dst_pos.unwrap()
+                            } else {
+                                let r = ret.len();
+                                if last_in_this_branch {
+                                    out_dst_pos = Some(r);
+                                }
+                                ret.push(Default::default());
+                                r
+                            };
+                            ret[ret_alternation_build_position]
+                                .non_capture
+                                .push(SetSpan::from(out_dst, false, false));
+                            ret_alternation_build_position = out_dst;
+                        }
+                        ParrallelPathTokenVariant::CreateCapture => {
+                            let out_dst = if last_in_this_branch && out_dst_pos.is_some() {
+                                out_dst_pos.unwrap()
+                            } else {
+                                let r = ret.len();
+                                if last_in_this_branch {
+                                    out_dst_pos = Some(r);
+                                }
+                                ret.push(Default::default());
+                                r
+                            };
+                            ret[ret_alternation_build_position]
+                                .create_capture
+                                .push(SetSpan::from(out_dst, false, false));
+                            ret_alternation_build_position = out_dst;
+                        }
+                        // not allowed in alternation
+                        ParrallelPathTokenVariant::PopReplace(_) => unreachable!(),
+                        ParrallelPathTokenVariant::Backref(n) => {
+                            let out_dst = if last_in_this_branch && out_dst_pos.is_some() {
+                                out_dst_pos.unwrap()
+                            } else {
+                                let r = ret.len();
+                                if last_in_this_branch {
+                                    out_dst_pos = Some(r);
+                                }
+                                ret.push(Default::default());
+                                r
+                            };
+                            ret[ret_alternation_build_position]
+                                .backref
+                                .0
+                                .entry(n)
+                                .or_default()
+                                .push(SetSpan::from(out_dst, false, false));
+                            ret_alternation_build_position = out_dst;
+                        }
+                        ParrallelPathTokenVariant::CreateReplace(n) => {
+                            let out_dst = if last_in_this_branch && out_dst_pos.is_some() {
+                                out_dst_pos.unwrap()
+                            } else {
+                                let r = ret.len();
+                                if last_in_this_branch {
+                                    out_dst_pos = Some(r);
+                                }
+                                ret.push(Default::default());
+                                r
+                            };
+                            ret[ret_alternation_build_position]
+                                .create_replace
+                                .0
+                                .entry(n)
+                                .or_default()
+                                .push(SetSpan::from(out_dst, false, false));
+                            ret_alternation_build_position = out_dst;
+                        }
+                    }
+                }
+            }
+
+            // now that each of the branches have been built, continue to build the rest of the pattern
+            Self::build_subroutine(self, dst_in_position, ret, None)?;
+        }
+
         let ellipsis = std::mem::take(&mut self.nodes[in_position].ellipsis);
 
         ellipsis.handle(|in_dst, bracket_type| {
@@ -1024,7 +1325,8 @@ impl GraphBuilder {
                 ret.push(Default::default());
                 Self::build_subroutine(self, in_dst, ret, None)?;
                 ret[ret_current_position]
-                    .backref.0
+                    .backref
+                    .0
                     .entry(capture_index)
                     .or_default()
                     .push(SetSpan::from(out_dst, set_start, set_end));
@@ -1038,7 +1340,8 @@ impl GraphBuilder {
                 ret.push(Default::default());
                 Self::build_subroutine(self, in_dst, ret, None)?;
                 ret[ret_current_position]
-                    .create_replace.0
+                    .create_replace
+                    .0
                     .entry(capture_index)
                     .or_default()
                     .push(SetSpan::from(out_dst, set_start, set_end));
@@ -1052,7 +1355,8 @@ impl GraphBuilder {
                 ret.push(Default::default());
                 Self::build_subroutine(self, in_dst, ret, None)?;
                 ret[ret_current_position]
-                    .pop_replace.0
+                    .pop_replace
+                    .0
                     .entry(capture_index)
                     .or_default()
                     .push(SetSpan::from(out_dst, set_start, set_end));
@@ -1097,13 +1401,13 @@ impl GraphBuilder {
 
                             if repitition_current_position == ret_current_position {
                                 match node {
-                                    RepititionTokenVariant::Uncontained
-                                    | RepititionTokenVariant::Corner
-                                    | RepititionTokenVariant::Round
-                                    | RepititionTokenVariant::Square
-                                    | RepititionTokenVariant::Curly
-                                    | RepititionTokenVariant::ScopeBlocking
-                                    | RepititionTokenVariant::StatementBlocking => {
+                                    ParrallelPathTokenVariant::Uncontained
+                                    | ParrallelPathTokenVariant::Corner
+                                    | ParrallelPathTokenVariant::Round
+                                    | ParrallelPathTokenVariant::Square
+                                    | ParrallelPathTokenVariant::Curly
+                                    | ParrallelPathTokenVariant::ScopeBlocking
+                                    | ParrallelPathTokenVariant::StatementBlocking => {
                                         // TODO there isn't a strong reason for this
                                         // - simplifies implementation and there's
                                         // always a different way of writing the
@@ -1116,9 +1420,9 @@ impl GraphBuilder {
                             }
 
                             match node {
-                                RepititionTokenVariant::Captureable(_)
-                                | RepititionTokenVariant::Byte(_)
-                                | RepititionTokenVariant::LexicalLevelChange(_) => {
+                                ParrallelPathTokenVariant::Captureable(_)
+                                | ParrallelPathTokenVariant::Byte(_)
+                                | ParrallelPathTokenVariant::LexicalLevelChange(_) => {
                                     let out_dst = if last_in_cycle && loop_back_index.is_some() {
                                         loop_back_index.unwrap()
                                     } else {
@@ -1128,15 +1432,15 @@ impl GraphBuilder {
                                     };
 
                                     let transition_to_insert = match node.clone() {
-                                        RepititionTokenVariant::Byte(b) => {
+                                        ParrallelPathTokenVariant::Byte(b) => {
                                             GraphTokenVariant::Byte(b)
                                         }
-                                        RepititionTokenVariant::Captureable(items) => {
+                                        ParrallelPathTokenVariant::Captureable(items) => {
                                             GraphTokenVariant::Captureable(SmallVecBincodeWrapper(
                                                 items,
                                             ))
                                         }
-                                        RepititionTokenVariant::LexicalLevelChange(lv) => {
+                                        ParrallelPathTokenVariant::LexicalLevelChange(lv) => {
                                             GraphTokenVariant::LexicalLevelChange(lv)
                                         }
                                         _ => unreachable!(),
@@ -1149,7 +1453,7 @@ impl GraphBuilder {
                                     );
                                     repitition_current_position = out_dst;
                                 }
-                                RepititionTokenVariant::Uncontained => {
+                                ParrallelPathTokenVariant::Uncontained => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1183,7 +1487,7 @@ impl GraphBuilder {
                                         }
                                     }
                                 }
-                                RepititionTokenVariant::Corner => {
+                                ParrallelPathTokenVariant::Corner => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1202,7 +1506,7 @@ impl GraphBuilder {
                                             .push(repitition_current_position);
                                     }
                                 }
-                                RepititionTokenVariant::Round => {
+                                ParrallelPathTokenVariant::Round => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1232,7 +1536,7 @@ impl GraphBuilder {
                                         }
                                     }
                                 }
-                                RepititionTokenVariant::Square => {
+                                ParrallelPathTokenVariant::Square => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1262,7 +1566,7 @@ impl GraphBuilder {
                                         }
                                     }
                                 }
-                                RepititionTokenVariant::Curly => {
+                                ParrallelPathTokenVariant::Curly => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1292,7 +1596,7 @@ impl GraphBuilder {
                                         }
                                     }
                                 }
-                                RepititionTokenVariant::ScopeBlocking => {
+                                ParrallelPathTokenVariant::ScopeBlocking => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1310,7 +1614,7 @@ impl GraphBuilder {
                                             .push(repitition_current_position);
                                     }
                                 }
-                                RepititionTokenVariant::StatementBlocking => {
+                                ParrallelPathTokenVariant::StatementBlocking => {
                                     if last_in_cycle && loop_back_index.is_some() {
                                         // delete the current node
                                         ret.pop();
@@ -1328,7 +1632,7 @@ impl GraphBuilder {
                                             .push(repitition_current_position);
                                     }
                                 }
-                                RepititionTokenVariant::NonCapturingCapture => {
+                                ParrallelPathTokenVariant::NonCapturingCapture => {
                                     let out_dst = if last_in_cycle && loop_back_index.is_some() {
                                         loop_back_index.unwrap()
                                     } else {
@@ -1342,7 +1646,7 @@ impl GraphBuilder {
                                         .push(SetSpan::from(out_dst, false, false));
                                     repitition_current_position = out_dst;
                                 }
-                                RepititionTokenVariant::CreateCapture => {
+                                ParrallelPathTokenVariant::CreateCapture => {
                                     let out_dst = if last_in_cycle && loop_back_index.is_some() {
                                         loop_back_index.unwrap()
                                     } else {
@@ -1356,7 +1660,7 @@ impl GraphBuilder {
                                         .push(SetSpan::from(out_dst, false, false));
                                     repitition_current_position = out_dst;
                                 }
-                                RepititionTokenVariant::CreateReplace(n) => {
+                                ParrallelPathTokenVariant::CreateReplace(n) => {
                                     let out_dst = if last_in_cycle && loop_back_index.is_some() {
                                         loop_back_index.unwrap()
                                     } else {
@@ -1365,13 +1669,14 @@ impl GraphBuilder {
                                         r
                                     };
                                     ret[repitition_current_position]
-                                        .create_replace.0
+                                        .create_replace
+                                        .0
                                         .entry(*n)
                                         .or_default()
                                         .push(SetSpan::from(out_dst, false, false));
                                     repitition_current_position = out_dst;
                                 }
-                                RepititionTokenVariant::Backref(n) => {
+                                ParrallelPathTokenVariant::Backref(n) => {
                                     let out_dst = if last_in_cycle && loop_back_index.is_some() {
                                         loop_back_index.unwrap()
                                     } else {
@@ -1380,13 +1685,14 @@ impl GraphBuilder {
                                         r
                                     };
                                     ret[repitition_current_position]
-                                        .backref.0
+                                        .backref
+                                        .0
                                         .entry(*n)
                                         .or_default()
                                         .push(SetSpan::from(out_dst, false, false));
                                     repitition_current_position = out_dst;
                                 }
-                                RepititionTokenVariant::PopReplace(n) => {
+                                ParrallelPathTokenVariant::PopReplace(n) => {
                                     let out_dst = if last_in_cycle && loop_back_index.is_some() {
                                         loop_back_index.unwrap()
                                     } else {
@@ -1395,7 +1701,8 @@ impl GraphBuilder {
                                         r
                                     };
                                     ret[repitition_current_position]
-                                        .pop_replace.0
+                                        .pop_replace
+                                        .0
                                         .entry(*n)
                                         .or_default()
                                         .push(SetSpan::from(out_dst, false, false));

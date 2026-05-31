@@ -144,7 +144,7 @@ fn main() -> Result<(), String> {
                         };
 
                         let _ = match lang {
-                            Language::C | Language::Cpp | Language::CSharp | Language::Java => {
+                            Language::C | Language::CSharp | Language::Java => {
                                 matcher.process_and_drain(
                                     &mut r,
                                     make_c_like_lexer(false, false, args.max_token_length),

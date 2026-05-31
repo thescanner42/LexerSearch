@@ -1,0 +1,26 @@
+patterns:
+- |-
+  free({{PROP}})
+  ..}
+  free(..^ {{PROP}} ..$)
+name: p0
+group:
+  name: double_free
+  match:
+  - _A
+  - _B
+  - _C
+templates:
+  PROP:
+    - $_A
+    - $_A->$_B
+    - $_A.$_B
+    - $_A[$_B]
+    # LexerSearch doesn't support multi-token captures and it's not clear how
+    # that would be implemented safely. instead, a similarity fallback is good
+    # enough. this may give false positives:
+    - $_A.$_B ... $_C
+    - $_A->$_B ... $_C
+    - $_A[$_B] ... $_C
+languages:
+  - c

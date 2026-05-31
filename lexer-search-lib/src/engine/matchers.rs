@@ -50,7 +50,6 @@ pub fn make_rust_like_lexer(
 #[derive(Default, Debug)]
 struct GraphsBuilder {
     c_graph: GraphBuilder,
-    cpp_graph: GraphBuilder,
     csharp_graph: GraphBuilder,
     go_graph: GraphBuilder,
     java_graph: GraphBuilder,
@@ -65,7 +64,6 @@ impl GraphsBuilder {
     pub fn graph_for_lang_mut(&mut self, lang: Language) -> &mut GraphBuilder {
         match lang {
             Language::C => &mut self.c_graph,
-            Language::Cpp => &mut self.cpp_graph,
             Language::CSharp => &mut self.csharp_graph,
             Language::Go => &mut self.go_graph,
             Language::Java => &mut self.java_graph,
@@ -82,8 +80,6 @@ impl GraphsBuilder {
 pub struct Graphs {
     #[serde(skip_serializing_if = "Graph::is_default")]
     c_graph: Graph,
-    #[serde(skip_serializing_if = "Graph::is_default")]
-    cpp_graph: Graph,
     #[serde(skip_serializing_if = "Graph::is_default")]
     csharp_graph: Graph,
     #[serde(skip_serializing_if = "Graph::is_default")]
@@ -106,7 +102,6 @@ impl Graphs {
     pub fn graph_for_lang(&self, lang: Language) -> &Graph {
         match lang {
             Language::C => &self.c_graph,
-            Language::Cpp => &self.cpp_graph,
             Language::CSharp => &self.csharp_graph,
             Language::Go => &self.go_graph,
             Language::Java => &self.java_graph,
@@ -121,7 +116,6 @@ impl Graphs {
     pub fn graph_for_lang_mut(&mut self, lang: Language) -> &mut Graph {
         match lang {
             Language::C => &mut self.c_graph,
-            Language::Cpp => &mut self.cpp_graph,
             Language::CSharp => &mut self.csharp_graph,
             Language::Go => &mut self.go_graph,
             Language::Java => &mut self.java_graph,
@@ -165,7 +159,6 @@ impl Graphs {
                                     let mut reader = std::io::Cursor::new(&pattern);
                                     match lang {
                                         Language::C
-                                        | Language::Cpp
                                         | Language::CSharp
                                         | Language::Java => {
                                             builders.graph_for_lang_mut(*lang).add_pattern(
@@ -225,7 +218,6 @@ impl Graphs {
 
         Ok(Graphs {
             c_graph: builders.c_graph.build()?,
-            cpp_graph: builders.cpp_graph.build()?,
             csharp_graph: builders.csharp_graph.build()?,
             go_graph: builders.go_graph.build()?,
             java_graph: builders.java_graph.build()?,

@@ -2,7 +2,10 @@ use crate::lexer::{EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, P
 
 use rand::{RngExt, rng};
 use smallvec::SmallVec;
-use std::sync::OnceLock;
+use std::{
+    hash::{Hash},
+    sync::OnceLock,
+};
 
 /// bounded length owned token
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -84,7 +87,7 @@ impl Token {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum RepititionTokenVariant {
+pub enum ParrallelPathTokenVariant {
     Byte(u8),
     Captureable(SmallVec<[u8; 0x40]>),
     /// see LexerTokenVariant for more details
@@ -106,48 +109,48 @@ pub enum RepititionTokenVariant {
     CreateReplace(usize),
 }
 
-impl RepititionTokenVariant {
+impl ParrallelPathTokenVariant {
     pub fn as_hash_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32);
 
         match self {
-            RepititionTokenVariant::Byte(b) => {
+            ParrallelPathTokenVariant::Byte(b) => {
                 out.push(0);
                 out.push(*b);
             }
 
-            RepititionTokenVariant::Captureable(bytes) => {
+            ParrallelPathTokenVariant::Captureable(bytes) => {
                 out.push(1);
                 out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 out.extend_from_slice(bytes);
             }
 
-            RepititionTokenVariant::LexicalLevelChange(d) => {
+            ParrallelPathTokenVariant::LexicalLevelChange(d) => {
                 out.push(2);
                 out.extend_from_slice(&d.to_le_bytes());
             }
 
-            RepititionTokenVariant::Uncontained => out.push(3),
-            RepititionTokenVariant::Corner => out.push(4),
-            RepititionTokenVariant::Round => out.push(5),
-            RepititionTokenVariant::Square => out.push(6),
-            RepititionTokenVariant::Curly => out.push(7),
-            RepititionTokenVariant::ScopeBlocking => out.push(8),
-            RepititionTokenVariant::StatementBlocking => out.push(9),
+            ParrallelPathTokenVariant::Uncontained => out.push(3),
+            ParrallelPathTokenVariant::Corner => out.push(4),
+            ParrallelPathTokenVariant::Round => out.push(5),
+            ParrallelPathTokenVariant::Square => out.push(6),
+            ParrallelPathTokenVariant::Curly => out.push(7),
+            ParrallelPathTokenVariant::ScopeBlocking => out.push(8),
+            ParrallelPathTokenVariant::StatementBlocking => out.push(9),
 
-            RepititionTokenVariant::NonCapturingCapture => {
+            ParrallelPathTokenVariant::NonCapturingCapture => {
                 out.push(11);
             }
-            RepititionTokenVariant::Backref(v) => {
+            ParrallelPathTokenVariant::Backref(v) => {
                 out.push(12);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             }
-            RepititionTokenVariant::CreateCapture => out.push(13),
-            RepititionTokenVariant::PopReplace(v) => {
+            ParrallelPathTokenVariant::CreateCapture => out.push(13),
+            ParrallelPathTokenVariant::PopReplace(v) => {
                 out.push(14);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             }
-            RepititionTokenVariant::CreateReplace(v) => {
+            ParrallelPathTokenVariant::CreateReplace(v) => {
                 out.push(15);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             }
@@ -167,33 +170,39 @@ fn seed() -> &'static [u8; 32] {
     })
 }
 
+
+/// used for both multirepitition and alternation
 #[derive(Debug)]
-pub struct MultiRepitition {
+pub struct ParallelPath {
     incremental_hasher: blake3::Hasher,
-    v: Vec<Vec<RepititionTokenVariant>>,
+    v: Vec<Vec<ParrallelPathTokenVariant>>,
 }
 
-impl MultiRepitition {
-    pub fn push(&mut self, v: RepititionTokenVariant) {
+impl ParallelPath {
+    pub fn push(&mut self, v: ParrallelPathTokenVariant) {
         self.incremental_hasher.update(&v.as_hash_bytes());
 
         self.v
             .last_mut()
-            .expect("MultiRepitition always contains at least one repetition")
+            .expect("ParallelPath always contains at least one repetition")
             .push(v);
     }
 
-    pub fn push_repitition(&mut self) {
+    pub fn push_branch(&mut self) {
         self.incremental_hasher.update(b"\xff");
         self.v.push(Vec::new());
     }
 
-    pub fn get_vec(self) -> Vec<Vec<RepititionTokenVariant>> {
+    pub fn vec_ref(&self) -> &Vec<Vec<ParrallelPathTokenVariant>> {
+        &self.v
+        }
+
+    pub fn get_vec(self) -> Vec<Vec<ParrallelPathTokenVariant>> {
         self.v
     }
 }
 
-impl Default for MultiRepitition {
+impl Default for ParallelPath {
     fn default() -> Self {
         Self {
             incremental_hasher: blake3::Hasher::new_keyed(seed()),
@@ -202,15 +211,15 @@ impl Default for MultiRepitition {
     }
 }
 
-impl PartialEq for MultiRepitition {
+impl PartialEq for ParallelPath {
     fn eq(&self, other: &Self) -> bool {
         self.v == other.v
     }
 }
 
-impl Eq for MultiRepitition {}
+impl Eq for ParallelPath {}
 
-impl std::hash::Hash for MultiRepitition {
+impl std::hash::Hash for ParallelPath {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         let digest = self.incremental_hasher.finalize();
         state.write(digest.as_bytes());
