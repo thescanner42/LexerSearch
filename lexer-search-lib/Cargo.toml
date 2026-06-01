@@ -1,6 +1,6 @@
 [package]
 name = "lexer-search-lib"
-version = "3.5.0"
+version = "3.5.1"
 edition = "2024"
 
 [dependencies]
@@ -12,7 +12,8 @@ serde_yml = "0.0.12"
 walkdir = "2.5.0"
 rayon = { version = "1.10", optional = true }
 blake3 = "1.8.5"
-rand = "0.10.1"
+# match ahash's version for downstream UI getrandom issue
+rand = "0.8"
 lru = "0.18.0"
 smallvec = { version = "1.15.1", features = ["serde"] }
 ahash = { version = "0.8.12", features = ["serde"] }

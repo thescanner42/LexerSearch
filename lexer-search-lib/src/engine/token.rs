@@ -1,6 +1,6 @@
 use crate::lexer::{EllipsisEnum, LexerToken, LexerTokenVariant, MaybeSliceRef, Position};
 
-use rand::{RngExt, rng};
+use rand::RngCore;
 use smallvec::SmallVec;
 use std::{
     hash::{Hash},
@@ -165,11 +165,10 @@ static GLOBAL_SEED: OnceLock<[u8; 32]> = OnceLock::new();
 fn seed() -> &'static [u8; 32] {
     GLOBAL_SEED.get_or_init(|| {
         let mut b = [0u8; 32];
-        rng().fill(&mut b);
+        rand::rngs::OsRng.fill_bytes(&mut b);
         b
     })
 }
-
 
 /// used for both multirepitition and alternation
 #[derive(Debug)]
