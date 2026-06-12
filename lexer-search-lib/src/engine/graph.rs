@@ -955,7 +955,30 @@ impl GraphBuilder {
         // handle alternation
         let mut alternations = std::mem::take(&mut self.nodes[in_position].alternation);
         for (alternation, dst_in_position) in alternations.drain() {
-            let alternation = alternation.get_vec();
+            let mut alternation = alternation.get_vec();
+
+            let mut any_alternation_is_empty = false;
+            alternation.retain(|e| {
+                if e.is_empty() {
+                    any_alternation_is_empty = true;
+                    false
+                } else {
+                    true
+                }
+            });
+
+            let zero_case_transitions = if any_alternation_is_empty {
+                // snapshot state before building the zero case
+                let before_modification = std::mem::take(&mut ret[ret_current_position]);
+                Self::build_subroutine(self, dst_in_position, ret, Some(ret_current_position))?;
+                let zero_case_transitions = std::mem::take(&mut ret[ret_current_position]);
+                ret[ret_current_position] = before_modification;
+                Self::copy_transitions(&zero_case_transitions, &mut ret[ret_current_position])?;
+                Some(zero_case_transitions)
+            } else {
+                None
+            };
+
             // each of the branches in the same alternation end up at the
             // same output position. once one of them is created, this is
             // set to Some(), and the others build to the same position
@@ -967,13 +990,6 @@ impl GraphBuilder {
                 let mut ret_alternation_build_position = ret_current_position;
 
                 let alternation_len = alternation.len();
-
-                if alternation_len == 0 {
-                    return Err(
-                        "empty alternation branch not supported - use a template instead"
-                            .to_string(),
-                    );
-                }
 
                 for (i, token) in alternation.into_iter().enumerate() {
                     let last_in_this_branch = i == alternation_len - 1;
@@ -1187,8 +1203,16 @@ impl GraphBuilder {
                 }
             }
 
-            // now that each of the branches have been built, continue to build the rest of the pattern
-            Self::build_subroutine(self, dst_in_position, ret, None)?;
+            // copy the zero case transitions onto the shared branch endpoint,
+            // so that after matching any branch the continuation is reachable
+            if let Some(zero_case_transitions) = zero_case_transitions {
+                if let Some(tail) = out_dst_pos {
+                    Self::copy_transitions(&zero_case_transitions, &mut ret[tail])?;
+                }
+            } else {
+                // no zero case — build the continuation normally off the shared tail
+                Self::build_subroutine(self, dst_in_position, ret, None)?;
+            }
         }
 
         let ellipsis = std::mem::take(&mut self.nodes[in_position].ellipsis);
@@ -1210,50 +1234,71 @@ impl GraphBuilder {
                         corner: vec![loop_dst],
                         other: GraphNodeEllipsisInfoEnum::None,
                     };
-                    ret[ret_current_position].ellipsis = GraphNodeEllipsisInfo {
-                        corner: vec![loop_dst],
-                        other: Default::default(),
-                    };
+                    ret[ret_current_position].ellipsis.corner.push(loop_dst);
                 }
                 crate::engine::span::EllipsisInfoHandleEnum::Uncontained => {
                     ret[loop_dst].ellipsis = GraphNodeEllipsisInfo {
                         corner: Default::default(),
                         other: GraphNodeEllipsisInfoEnum::Uncontained(vec![loop_dst]),
                     };
-                    ret[ret_current_position].ellipsis = GraphNodeEllipsisInfo {
-                        corner: vec![],
-                        other: GraphNodeEllipsisInfoEnum::Uncontained(vec![loop_dst]),
-                    };
+                    match &mut ret[ret_current_position].ellipsis.other {
+                        GraphNodeEllipsisInfoEnum::None => {
+                            ret[ret_current_position].ellipsis.other =
+                                GraphNodeEllipsisInfoEnum::Uncontained(vec![loop_dst]);
+                        }
+                        GraphNodeEllipsisInfoEnum::Uncontained(v) => {
+                            v.push(loop_dst);
+                        }
+                        _ => return Err("incompatible ellipsis combination".to_string()), // never
+                    }
                 }
                 crate::engine::span::EllipsisInfoHandleEnum::Round => {
                     ret[loop_dst].ellipsis = GraphNodeEllipsisInfo {
                         corner: Default::default(),
                         other: GraphNodeEllipsisInfoEnum::Round(vec![loop_dst]),
                     };
-                    ret[ret_current_position].ellipsis = GraphNodeEllipsisInfo {
-                        corner: vec![],
-                        other: GraphNodeEllipsisInfoEnum::Round(vec![loop_dst]),
-                    };
+                    match &mut ret[ret_current_position].ellipsis.other {
+                        GraphNodeEllipsisInfoEnum::None => {
+                            ret[ret_current_position].ellipsis.other =
+                                GraphNodeEllipsisInfoEnum::Round(vec![loop_dst]);
+                        }
+                        GraphNodeEllipsisInfoEnum::Round(v) => {
+                            v.push(loop_dst);
+                        }
+                        _ => return Err("incompatible ellipsis combination".to_string()), // never
+                    }
                 }
                 crate::engine::span::EllipsisInfoHandleEnum::Square => {
                     ret[loop_dst].ellipsis = GraphNodeEllipsisInfo {
                         corner: Default::default(),
                         other: GraphNodeEllipsisInfoEnum::Square(vec![loop_dst]),
                     };
-                    ret[ret_current_position].ellipsis = GraphNodeEllipsisInfo {
-                        corner: vec![],
-                        other: GraphNodeEllipsisInfoEnum::Square(vec![loop_dst]),
-                    };
+                    match &mut ret[ret_current_position].ellipsis.other {
+                        GraphNodeEllipsisInfoEnum::None => {
+                            ret[ret_current_position].ellipsis.other =
+                                GraphNodeEllipsisInfoEnum::Square(vec![loop_dst]);
+                        }
+                        GraphNodeEllipsisInfoEnum::Square(v) => {
+                            v.push(loop_dst);
+                        }
+                        _ => return Err("incompatible ellipsis combination".to_string()), // never
+                    }
                 }
                 crate::engine::span::EllipsisInfoHandleEnum::Curly => {
                     ret[loop_dst].ellipsis = GraphNodeEllipsisInfo {
                         corner: Default::default(),
                         other: GraphNodeEllipsisInfoEnum::Curly(vec![loop_dst]),
                     };
-                    ret[ret_current_position].ellipsis = GraphNodeEllipsisInfo {
-                        corner: vec![],
-                        other: GraphNodeEllipsisInfoEnum::Curly(vec![loop_dst]),
-                    };
+                    match &mut ret[ret_current_position].ellipsis.other {
+                        GraphNodeEllipsisInfoEnum::None => {
+                            ret[ret_current_position].ellipsis.other =
+                                GraphNodeEllipsisInfoEnum::Curly(vec![loop_dst]);
+                        }
+                        GraphNodeEllipsisInfoEnum::Curly(v) => {
+                            v.push(loop_dst);
+                        }
+                        _ => return Err("incompatible ellipsis combination".to_string()), // never
+                    }
                 }
             };
             // transition from the loop node
