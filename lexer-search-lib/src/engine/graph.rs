@@ -983,6 +983,7 @@ impl GraphBuilder {
             // same output position. once one of them is created, this is
             // set to Some(), and the others build to the same position
             let mut out_dst_pos: Option<usize> = None;
+            let mut reflexive_tails: Vec<usize> = Vec::new();
             for alternation in alternation.into_iter() {
                 // mark the current output position, as for each of the alternations
                 // we will start at the same position in the output and build off of
@@ -993,22 +994,27 @@ impl GraphBuilder {
 
                 for (i, token) in alternation.into_iter().enumerate() {
                     let last_in_this_branch = i == alternation_len - 1;
-                    if ret_alternation_build_position == ret_current_position || last_in_this_branch
-                    {
-                        match token {
-                            ParrallelPathTokenVariant::Uncontained
-                            | ParrallelPathTokenVariant::Corner
-                            | ParrallelPathTokenVariant::Round
-                            | ParrallelPathTokenVariant::Square
-                            | ParrallelPathTokenVariant::Curly
-                            | ParrallelPathTokenVariant::ScopeBlocking
-                            | ParrallelPathTokenVariant::StatementBlocking => {
-                                // this can be improved - needs thinking to
-                                // prevent pattern conflicts since the start and
-                                // end of each branch is shared
-                                return Err("alternation can't start or end with a reflexive transition (e.g. ...)".to_string());
-                            }
-                            _ => {}
+                    let is_reflexive_transition = match token {
+                        ParrallelPathTokenVariant::Uncontained
+                        | ParrallelPathTokenVariant::Corner
+                        | ParrallelPathTokenVariant::Round
+                        | ParrallelPathTokenVariant::Square
+                        | ParrallelPathTokenVariant::Curly
+                        | ParrallelPathTokenVariant::ScopeBlocking
+                        | ParrallelPathTokenVariant::StatementBlocking => true,
+                        _ => false,
+                    };
+
+                    if is_reflexive_transition {
+                        if ret_alternation_build_position == ret_current_position {
+                            return Err(
+                                "alternation requires content before reflexive transition (e.g. ...)"
+                                    .to_string(),
+                            );
+                        }
+
+                        if last_in_this_branch {
+                            reflexive_tails.push(ret_alternation_build_position);
                         }
                     }
 
@@ -1209,9 +1215,21 @@ impl GraphBuilder {
                 if let Some(tail) = out_dst_pos {
                     Self::copy_transitions(&zero_case_transitions, &mut ret[tail])?;
                 }
+                for &pos in &reflexive_tails {
+                    Self::copy_transitions(&zero_case_transitions, &mut ret[pos])?;
+                }
             } else {
-                // no zero case — build the continuation normally off the shared tail
-                Self::build_subroutine(self, dst_in_position, ret, None)?;
+                let before = std::mem::take(&mut ret[ret_current_position]);
+                Self::build_subroutine(self, dst_in_position, ret, Some(ret_current_position))?;
+                let continuation = std::mem::take(&mut ret[ret_current_position]);
+                ret[ret_current_position] = before;
+
+                if let Some(tail) = out_dst_pos {
+                    Self::copy_transitions(&continuation, &mut ret[tail])?;
+                }
+                for &pos in &reflexive_tails {
+                    Self::copy_transitions(&continuation, &mut ret[pos])?;
+                }
             }
         }
 
